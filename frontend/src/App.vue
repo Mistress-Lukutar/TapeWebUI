@@ -15,6 +15,7 @@ const runtime = useRuntimeStore()
 const page = ref<Page>('dashboard')
 
 const status = computed(() => drive.state.status)
+const currentLabel = computed(() => pages.find((item) => item.key === page.value)?.label ?? '')
 const lastUpdated = computed(() => {
   const updated = status.value?.updated_at
   if (!updated) return '—'
@@ -96,6 +97,10 @@ onMounted(() => {
     </aside>
 
     <div class="main-content">
+      <header class="page-header">
+        <h1>{{ currentLabel }}</h1>
+      </header>
+
       <main v-if="page === 'dashboard'">
         <div class="columns">
           <div class="panel half">

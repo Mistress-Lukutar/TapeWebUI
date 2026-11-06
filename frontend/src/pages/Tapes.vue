@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { apiGet, formatBytes, formatIso } from '../api'
+import { apiGet, apiSend, formatBytes, formatIso } from '../api'
 
 interface Tape {
   id: number
@@ -89,12 +89,35 @@ async function markErased(tape: Tape): Promise<void> {
   await load()
 }
 
+const renamingId = ref<number | null>(null)
+const renameLabel = ref('')
+
+function startRename(tape: Tape): void {
+  error.value = ''
+  renamingId.value = tape.id
+  renameLabel.value = tape.label
+}
+
+async function saveRename(tape: Tape): Promise<void> {
+  error.value = ''
+  try {
+    const updated = await apiSend<Tape>(`/api/tapes/${tape.id}`, 'PUT', {
+      label: renameLabel.value,
+    })
+    tapes.value = tapes.value.map((item) => (item.id === updated.id ? updated : item))
+    if (details.value?.id === updated.id) {
+      details.value = { ...details.value, label: updated.label }
+    }
+    renamingId.value = null
+  } catch (err) {
+    error.value = String(err)
+  }
+}
+
 onMounted(load)
 </script>
 
 <template>
-  <h2>Tapes</h2>
-
   <div class="columns">
     <div class="panel half">
       <h3>Catalog search</h3>
@@ -129,12 +152,28 @@ onMounted(load)
         <tbody>
           <tr v-if="!tapes.length"><td colspan="5" class="dim">No tapes in the catalog yet.</td></tr>
           <tr v-for="tape in tapes" :key="tape.id">
-            <td><a href="#" @click.prevent="open(tape)">{{ tape.label || tape.uuid.slice(0, 8) }}</a></td>
+            <td>
+              <input
+                v-if="renamingId === tape.id"
+                v-model="renameLabel"
+                class="rename-input"
+                @keyup.enter="saveRename(tape)"
+                @keyup.esc="renamingId = null"
+              />
+              <a v-else href="#" @click.prevent="open(tape)">{{ tape.label || tape.uuid.slice(0, 8) }}</a>
+            </td>
             <td>{{ tape.status }}</td>
             <td>{{ formatBytes(tape.bytes_used) }}</td>
             <td>{{ formatIso(tape.created_at) }}</td>
             <td class="row-actions">
-              <button class="danger" @click="markErased(tape)">Erase-mark</button>
+              <template v-if="renamingId === tape.id">
+                <button class="primary" @click="saveRename(tape)">Save</button>
+                <button @click="renamingId = null">Cancel</button>
+              </template>
+              <template v-else>
+                <button @click="startRename(tape)">Rename</button>
+                <button class="danger" @click="markErased(tape)">Erase-mark</button>
+              </template>
             </td>
           </tr>
         </tbody>

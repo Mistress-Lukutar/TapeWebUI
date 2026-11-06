@@ -243,6 +243,15 @@ button.primary:hover:not(:disabled) {
   padding: 0 16px 32px;
 }
 
+/* Section title block above the page content. */
+.page-header {
+  padding: 16px 0 0;
+}
+
+.page-header h1 {
+  margin: 0 0 16px;
+}
+
 /* Collapse the sidebar into a horizontal bar on narrow screens. */
 @media (max-width: 860px) {
   .sidebar {
@@ -289,6 +298,23 @@ button.primary:hover:not(:disabled) {
 .columns .half {
   flex: 1 1 340px;
   min-width: 0;
+}
+
+/* Links follow the accent palette instead of browser defaults. */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* Inline tape rename field. */
+.rename-input {
+  width: 100%;
+  min-width: 140px;
 }
 
 /* Data tables. */

@@ -366,8 +366,6 @@ onMounted(() => {
 </script>
 
 <template>
-  <h2>Catalog</h2>
-
   <div class="panel catalog-toolbar">
     <div class="row-actions">
       <input

@@ -33,8 +33,6 @@ onMounted(load)
 </script>
 
 <template>
-  <h2>History</h2>
-
   <div class="panel">
     <table class="table">
       <thead>

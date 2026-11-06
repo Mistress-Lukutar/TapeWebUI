@@ -89,8 +89,6 @@ onMounted(load)
 </script>
 
 <template>
-  <h2>Jobs</h2>
-
   <div class="columns">
     <div class="panel half">
       <h3>Defined jobs</h3>
