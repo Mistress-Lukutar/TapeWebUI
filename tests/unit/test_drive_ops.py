@@ -3,15 +3,19 @@ File:   test_drive_ops.py
 Brief:  Unit tests for manual drive operations on the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
 
 import pytest
 
-from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
+from tapevaultui.infrastructure.itdt_transport import (
+    FakeItDtTransport,
+    ItDtResult,
+)
 from tapevaultui.services.drive_ops import ALL_OPS, DriveOpError, run_drive_op
+from tests.conftest import load_fixture
 
 
 @pytest.mark.unit
@@ -66,6 +70,73 @@ async def test_failing_command_raises() -> None:
     fake = FakeItDtTransport(scenarios={"load": ("Open failed: busy", 2)})
     with pytest.raises(DriveOpError, match="load failed"):
         await run_drive_op(fake, "load")
+
+
+class _LockedUnloadFake(FakeItDtTransport):
+    """Fake whose first unload fails with 53/02, later calls succeed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unload_calls = 0
+
+    async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
+        self.commands.append(tuple(args))
+        if args[0] == "unload":
+            self.unload_calls += 1
+            if self.unload_calls == 1:
+                return ItDtResult(
+                    args=tuple(self.build_args(args)),
+                    exit_code=2,
+                    stdout=load_fixture("fixture_unload_prevented.txt"),
+                    stderr="",
+                    duration_s=0.0,
+                )
+            return ItDtResult(
+                args=tuple(self.build_args(args)),
+                exit_code=0,
+                stdout="Unloading tape... done\n",
+                stderr="",
+                duration_s=0.0,
+            )
+        return ItDtResult(
+            args=tuple(self.build_args(args)),
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+
+@pytest.mark.unit
+async def test_unlocked_unload_does_not_send_allow() -> None:
+    """A healthy unload never issues the allow-removal workaround."""
+    fake = FakeItDtTransport()
+    await run_drive_op(fake, "unload")
+    assert fake.commands == [("unload",)]
+
+
+@pytest.mark.unit
+async def test_unload_retries_after_allow_when_locked() -> None:
+    """Unload rejected with 53/02 unlocks via allow, then ejects."""
+    fake = _LockedUnloadFake()
+    output = await run_drive_op(fake, "unload")
+
+    assert fake.commands == [("unload",), ("allow",), ("unload",)]
+    assert "done" in output
+
+
+@pytest.mark.unit
+async def test_unload_still_locked_raises_friendly_error() -> None:
+    """If the cartridge stays locked, a clear message is raised."""
+    fake = FakeItDtTransport(
+        scenarios={
+            "unload": (load_fixture("fixture_unload_prevented.txt"), 2),
+            "allow": ("", 0),
+        }
+    )
+    with pytest.raises(DriveOpError, match="locked"):
+        await run_drive_op(fake, "unload")
+    assert fake.commands == [("unload",), ("allow",), ("unload",)]
 
 
 @pytest.mark.unit

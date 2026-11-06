@@ -357,6 +357,32 @@ def is_medium_not_present(text: str) -> bool:
     return sense[2] == 0x02 and asc == 0x04 and ascq in (0x00, 0x02)
 
 
+def is_medium_removal_prevented(text: str) -> bool:
+    """Check whether ITDT output reports a locked cartridge (sense 53/02).
+
+    Windows (RSM / ltotape.sys) latches PREVENT MEDIUM REMOVAL on freshly
+    inserted media, so ``unload``/eject fails with ILLEGAL REQUEST sense
+    ASC/ASCQ ``53/02`` (MEDIUM REMOVAL PREVENTED) until an ALLOW MEDIUM
+    REMOVAL command is issued.
+
+    Args:
+        text: ITDT command output (e.g. a failed ``unload``).
+
+    Returns:
+        True if the output indicates medium removal is prevented.
+    """
+    if "medium removal prevented" in text.lower():
+        return True
+    sense = _sense_bytes_from_dump(text)
+    return (
+        len(sense) >= 14
+        and sense[0] & 0x7F in (0x70, 0x71)
+        and sense[2] == 0x05  # ILLEGAL REQUEST
+        and sense[12] == 0x53
+        and sense[13] == 0x02
+    )
+
+
 def is_open_failure(text: str) -> bool:
     """Check whether ITDT output indicates the device could not be opened.
 

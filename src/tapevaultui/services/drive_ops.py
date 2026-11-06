@@ -3,7 +3,7 @@ File:   drive_ops.py
 Brief:  Manual drive/media operations (ITDT-SE service commands) for the Service page.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Final
 
 import structlog
 
+from tapevaultui.infrastructure.itdt_parse import is_medium_removal_prevented
 from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtTransport,
@@ -48,7 +49,10 @@ class DriveOpError(RuntimeError):
     """Raised when a manual drive operation fails."""
 
 
-async def run_drive_op(transport: ItDtTransport | FakeItDtTransport, op: str) -> str:
+async def run_drive_op(
+    transport: ItDtTransport | FakeItDtTransport,
+    op: str,
+) -> str:
     """Execute one manual drive operation and return the ITDT output.
 
     Args:
@@ -85,7 +89,23 @@ async def run_drive_op(transport: ItDtTransport | FakeItDtTransport, op: str) ->
         raise DriveOpError(f"Unknown drive operation: {op}")
 
     result = await transport.run(list(args))
+    if (
+        op == "unload"
+        and result.exit_code != 0
+        and is_medium_removal_prevented(result.stdout)
+    ):
+        # Windows (RSM/ltotape) latches PREVENT MEDIUM REMOVAL on freshly
+        # inserted media; eject is rejected with sense 53/02 until removal
+        # is allowed again. Unlock and retry once.
+        logger.info("drive_op_medium_locked_retry", op=op)
+        await transport.run(["allow"])
+        result = await transport.run(["unload"])
     if result.exit_code != 0:
+        if op == "unload" and is_medium_removal_prevented(result.stdout):
+            raise DriveOpError(
+                "The cartridge stays locked by the system (medium removal "
+                "prevented). Run the 'unlock' operation, then unload again."
+            )
         raise DriveOpError(f"ITDT {args[0]} failed: {result.stdout.strip()}")
     logger.info("drive_op_done", op=op)
     return result.stdout.strip() or f"ITDT {args[0]} completed."

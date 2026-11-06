@@ -13,6 +13,7 @@ import pytest
 from tapevaultui.infrastructure.itdt_parse import (
     ItDtParseError,
     is_medium_not_present,
+    is_medium_removal_prevented,
     is_open_failure,
     parse_device_statistics,
     parse_devinfo,
@@ -168,3 +169,21 @@ def test_is_medium_not_present_open_failure() -> None:
     assert not is_medium_not_present(
         "Open failed: The system cannot find the file specified\n"
     )
+
+
+def test_is_medium_removal_prevented_sense_5302() -> None:
+    """An unload rejected with 53/02 sense is a locked cartridge."""
+    assert is_medium_removal_prevented(load_fixture("fixture_unload_prevented.txt"))
+
+
+def test_is_medium_removal_prevented_text_form() -> None:
+    """An explicit textual report is recognized without a sense dump."""
+    assert is_medium_removal_prevented("Operation FAILED: MEDIUM REMOVAL PREVENTED\n")
+
+
+def test_is_medium_removal_prevented_negative_cases() -> None:
+    """Other failures (no medium, healthy output) are not 'prevented'."""
+    no_medium = load_fixture("fixture_qrypos_no_medium.txt")
+    assert not is_medium_removal_prevented(no_medium)
+    assert not is_medium_removal_prevented(load_fixture("fixture_qrypos.txt"))
+    assert not is_medium_removal_prevented(load_fixture("fixture_vpd.txt"))
