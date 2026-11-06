@@ -73,7 +73,7 @@ NO_MEDIA_REWIND_OUTPUT = (
 async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
     """Writing the header issues one write -raw followed by a filemark."""
     fake = FakeItDtTransport()
-    await write_session_header(fake, _header(), tmp_path)  # type: ignore[arg-type]
+    await write_session_header(fake, _header(), tmp_path)
     assert [cmd[0] for cmd in fake.commands] == ["write", "weof"]
     command = fake.commands[0]
     assert command[:3] == ("write", "-raw", "-s")
@@ -88,7 +88,7 @@ async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
 async def test_write_filemarks_issues_weof() -> None:
     """write_filemarks issues weof with the requested count."""
     fake = FakeItDtTransport()
-    await write_filemarks(fake, 2)  # type: ignore[arg-type]
+    await write_filemarks(fake, 2)
     assert fake.commands == [("weof", "2")]
 
 
@@ -96,7 +96,7 @@ async def test_write_filemarks_failure_raises() -> None:
     """A failed weof raises SessionIoError with the ITDT output."""
     fake = FakeItDtTransport(scenarios={"weof": ("Filemark failed", 1)})
     with pytest.raises(SessionIoError, match="Filemark failed"):
-        await write_filemarks(fake)  # type: ignore[arg-type]
+        await write_filemarks(fake)
 
 
 async def test_read_header_roundtrip_on_fake(tmp_path: Path) -> None:
@@ -105,7 +105,7 @@ async def test_read_header_roundtrip_on_fake(tmp_path: Path) -> None:
     fake = FakeItDtTransport(
         scenarios={"read": (serialize_header(header).decode("utf-8"), 0)}
     )
-    parsed = await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+    parsed = await read_session_header(fake, tmp_path)
     assert parsed is not None
     assert parsed.tape_id == "tape-1"
     assert parsed.job_name == "photos"
@@ -115,7 +115,7 @@ async def test_read_header_roundtrip_on_fake(tmp_path: Path) -> None:
 async def test_read_header_foreign_tape_returns_none(tmp_path: Path) -> None:
     """A tape with garbage at t0 is reported as foreign (None)."""
     fake = FakeItDtTransport(scenarios={"read": ("\x00garbage not json", 0)})
-    parsed = await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+    parsed = await read_session_header(fake, tmp_path)
     assert parsed is None
 
 
@@ -125,21 +125,21 @@ async def test_read_header_read_failure_raises(tmp_path: Path) -> None:
         scenarios={"read": ("Boom", 1)},
     )
     with pytest.raises(SessionIoError, match="Boom"):
-        await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+        await read_session_header(fake, tmp_path)
 
 
 async def test_read_header_rewinds_after_read_failure(tmp_path: Path) -> None:
     """Even after a failed read the tape is left rewound."""
     fake = FakeItDtTransport(scenarios={"read": ("Boom", 1)})
     with pytest.raises(SessionIoError):
-        await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+        await read_session_header(fake, tmp_path)
     assert fake.commands[-1] == ("rewind",)
 
 
 async def test_read_header_blank_tape_returns_none(tmp_path: Path) -> None:
     """A never-written tape (blank-check read failure) yields None."""
     fake = FakeItDtTransport(scenarios={"read": (BLANK_READ_OUTPUT, 1117)})
-    parsed = await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+    parsed = await read_session_header(fake, tmp_path)
     assert parsed is None
     assert fake.commands[-1] == ("rewind",)  # left rewound after failure
 
@@ -150,7 +150,7 @@ async def test_rewind_without_media_raises_no_media_error(
     """A rewind failure with the cartridge ejected raises NoMediaError."""
     fake = FakeItDtTransport(scenarios={"rewind": (NO_MEDIA_REWIND_OUTPUT, 2)})
     with pytest.raises(NoMediaError, match="no loaded medium"):
-        await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+        await read_session_header(fake, tmp_path)
 
 
 def test_no_media_error_is_session_io_error() -> None:
@@ -161,9 +161,9 @@ def test_no_media_error_is_session_io_error() -> None:
 async def test_positioning_and_erase_helpers(tmp_path: Path) -> None:
     """seod/fsf/erase/identify issue the expected command sequences."""
     fake = FakeItDtTransport()
-    await space_to_end_of_data(fake)  # type: ignore[arg-type]
-    await space_forward_files(fake, 3)  # type: ignore[arg-type]
-    await erase_tape_short(fake)  # type: ignore[arg-type]
+    await space_to_end_of_data(fake)
+    await space_forward_files(fake, 3)
+    await erase_tape_short(fake)
     assert [cmd[0] for cmd in fake.commands] == ["seod", "fsf", "rewind", "erase"]
     assert fake.commands[1] == ("fsf", "3")
     assert fake.commands[3] == ("erase", "-short")
@@ -175,7 +175,7 @@ async def test_identify_tape_reads_header(tmp_path: Path) -> None:
     fake = FakeItDtTransport(
         scenarios={"read": (serialize_header(header).decode("utf-8"), 0)}
     )
-    identified = await identify_tape(fake, tmp_path)  # type: ignore[arg-type]
+    identified = await identify_tape(fake, tmp_path)
     assert identified is not None
     assert identified.tape_id == "tape-1"
 
@@ -184,7 +184,7 @@ async def test_failure_of_fsf_raises() -> None:
     """A failed fsf raises SessionIoError with the ITDT output."""
     fake = FakeItDtTransport(scenarios={"fsf": ("Beyond EOM", 1)})
     with pytest.raises(SessionIoError, match="Beyond EOM"):
-        await space_forward_files(fake, 1)  # type: ignore[arg-type]
+        await space_forward_files(fake, 1)
 
 
 def test_header_file_entry_validation() -> None:

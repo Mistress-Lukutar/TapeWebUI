@@ -224,9 +224,7 @@ class JobRuntime:
                     stats_json=stats.snapshot(),
                 )
             else:
-                self._record_terminal(
-                    entry, "done", None, stats_json=stats.snapshot()
-                )
+                self._record_terminal(entry, "done", None, stats_json=stats.snapshot())
         await self._engine.publish(stats)
 
     def _record_terminal(

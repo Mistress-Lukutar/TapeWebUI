@@ -43,11 +43,16 @@ def test_drive_refresh(client: TestClient) -> None:
 
 def test_drive_erase(client: TestClient) -> None:
     """Erase issues rewind + short erase and returns refreshed status."""
-    transport = client.app.state.transport  # type: ignore[union-attr]
+    transport = client.app.state.transport  # type: ignore[attr-defined]
     transport.commands.clear()
     response = client.post("/api/drive/erase")
     assert response.status_code == 200
     assert response.json()["reachable"] is True
-    assert [cmd[0] for cmd in transport.commands] == ["rewind", "erase", "vpd",
-                                                      "qrypos", "getparms"]
+    assert [cmd[0] for cmd in transport.commands] == [
+        "rewind",
+        "erase",
+        "vpd",
+        "qrypos",
+        "getparms",
+    ]
     assert ("erase", "-short") in transport.commands
