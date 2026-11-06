@@ -3,7 +3,7 @@ File:   restore_engine.py
 Brief:  Restore engine: plan, single-pass tape read, hash-checked write-out.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -369,6 +369,10 @@ class RestoreEngine:
         await self._publish(stats)
 
         dest = self._work_dir / f"restore_{uuid.uuid4().hex[:8]}.bin"
+        # Absolute positioning: space from BOP over the file index.
+        # Relative spacing after a previous read drifts whenever a
+        # skipped/failed file shifts the position.
+        await self._transport.run(["rewind"])
         await self._transport.run(["fsf", str(item.tape_file_index)])
         result = await self._transport.run(["read", "-d", str(dest)])
         if result.exit_code != 0:

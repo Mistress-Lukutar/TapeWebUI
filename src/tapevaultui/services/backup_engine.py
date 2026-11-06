@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.2
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from tapevaultui.services.session_io import (
     new_session_id,
     read_session_header,
     space_to_end_of_data,
+    write_filemarks,
     write_session_header,
 )
 from tapevaultui.services.snapshot import PlannedFile, sha256_of, snapshot_sources
@@ -317,15 +318,29 @@ class BackupEngine:
             stats.current_file_started = time.monotonic()
             await self.publish(stats)
             ticker = self._start_ticker(stats)
+            filemark_failure: str | None = None
             try:
                 result = await self._transport.run(["write", "-raw", "-s", file.path])
+                if result.exit_code == 0:
+                    # Delimit the tape file immediately: without a trailing
+                    # filemark the header/files merge into one giant tape
+                    # file, so BOP header reads and fsf positioning time out.
+                    await write_filemarks(self._transport)
+            except SessionIoError as exc:
+                # The data itself landed on tape (the write succeeded), but
+                # the file boundary did not — never treated as tape-full.
+                filemark_failure = str(exc)
             finally:
                 _stop_ticker(ticker)
 
             catalog_mtime = datetime.fromtimestamp(file.mtime, UTC)
-            if result.exit_code != 0:
-                stdout = result.stdout.strip()
-                if _looks_like_eom(stdout):
+            if filemark_failure is not None or result.exit_code != 0:
+                stdout = (
+                    filemark_failure
+                    if filemark_failure is not None
+                    else result.stdout.strip()
+                )
+                if filemark_failure is None and _looks_like_eom(stdout):
                     # Tape full: this file was NOT written; the next pass
                     # retries it on the following tape as a new session.
                     self._catalog.add_file(
@@ -421,7 +436,6 @@ class BackupEngine:
             entry.tape_file_index: entry
             for entry in self._catalog.list_files(session_id)
         }
-        await self._transport.run(["rewind"])
         damaged = 0
         for offset, file in enumerate(files):
             tape_index = offset + 1
@@ -433,6 +447,10 @@ class BackupEngine:
             stats.current_file = file.path
             await self.publish(stats)
             dest = self._work_dir / f"verify_{tape_index}.bin"
+            # Absolute positioning: space from BOP over tape_index
+            # filemarks. Relative spacing after a previous read drifts
+            # whenever a non-ok file was skipped.
+            await self._transport.run(["rewind"])
             await self._transport.run(["fsf", str(tape_index)])
             result = await self._transport.run(["read", "-d", str(dest)])
             if result.exit_code != 0:

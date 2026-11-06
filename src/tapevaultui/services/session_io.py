@@ -3,7 +3,7 @@ File:   session_io.py
 Brief:  Session header (t0) read/write helpers on top of the ITDT transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.1
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -86,6 +86,30 @@ async def write_session_header(
             f"ITDT write of session header failed: {result.stdout.strip()}"
         )
     logger.info("session_header_written", session_id=header.session_id)
+    await write_filemarks(transport)
+
+
+async def write_filemarks(
+    transport: ItDtTransport | FakeItDtTransport,
+    count: int = 1,
+) -> None:
+    """Write filemark(s) at the current tape position.
+
+    Filemarks delimit tape files; without one after the session header
+    (and each payload file) a ``read`` at BOP scans the whole data area
+    until timeout, and ``fsf``-based positioning cannot find files.
+
+    Args:
+        transport: ITDT transport (real or fake).
+        count: Number of filemarks to write (ITDT ``weof``).
+
+    Raises:
+        SessionIoError: If ITDT reports a failure.
+    """
+    result = await transport.run(["weof", str(count)])
+    if result.exit_code != 0:
+        raise SessionIoError(f"ITDT weof failed: {result.stdout.strip()}")
+    logger.info("filemark_written", count=count)
 
 
 def _looks_like_blank_read(stdout: str) -> bool:

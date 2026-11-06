@@ -3,7 +3,7 @@ File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.2
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -91,6 +91,11 @@ async def test_backup_writes_header_then_files(tmp_path: Path) -> None:
     write_commands = [cmd for cmd in fake.commands if cmd[0] == "write"]
     assert len(write_commands) == 3  # header + 2 files
     assert "header_" in write_commands[0][3]
+    # Every written tape file is delimited by a filemark (header + 2 files)
+    # so BOP header reads and fsf positioning stay O(1), not O(tape).
+    weof_commands = [cmd for cmd in fake.commands if cmd[0] == "weof"]
+    assert len(weof_commands) == 3
+    assert weof_commands[0] == ("weof", "1")
 
 
 async def test_backup_registers_tape_and_session(tmp_path: Path) -> None:

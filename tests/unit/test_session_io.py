@@ -3,7 +3,7 @@ File:   test_session_io.py
 Brief:  Session header I/O helper tests on the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.1
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from tapevaultui.services.session_io import (
     read_session_header,
     space_forward_files,
     space_to_end_of_data,
+    write_filemarks,
     write_session_header,
 )
 from tapevaultui.services.tape_format import (
@@ -70,10 +71,10 @@ NO_MEDIA_REWIND_OUTPUT = (
 
 
 async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
-    """Writing the header issues exactly one write -raw command."""
+    """Writing the header issues one write -raw followed by a filemark."""
     fake = FakeItDtTransport()
     await write_session_header(fake, _header(), tmp_path)  # type: ignore[arg-type]
-    assert len(fake.commands) == 1
+    assert [cmd[0] for cmd in fake.commands] == ["write", "weof"]
     command = fake.commands[0]
     assert command[:3] == ("write", "-raw", "-s")
     header_file = Path(command[3])
@@ -81,6 +82,21 @@ async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
     parsed = parse_header(header_file.read_bytes())
     assert parsed is not None
     assert parsed.tape_id == "tape-1"
+    assert fake.commands[1] == ("weof", "1")
+
+
+async def test_write_filemarks_issues_weof() -> None:
+    """write_filemarks issues weof with the requested count."""
+    fake = FakeItDtTransport()
+    await write_filemarks(fake, 2)  # type: ignore[arg-type]
+    assert fake.commands == [("weof", "2")]
+
+
+async def test_write_filemarks_failure_raises() -> None:
+    """A failed weof raises SessionIoError with the ITDT output."""
+    fake = FakeItDtTransport(scenarios={"weof": ("Filemark failed", 1)})
+    with pytest.raises(SessionIoError, match="Filemark failed"):
+        await write_filemarks(fake)  # type: ignore[arg-type]
 
 
 async def test_read_header_roundtrip_on_fake(tmp_path: Path) -> None:
