@@ -3,7 +3,7 @@ File:   dependencies.py
 Brief:  FastAPI dependency accessors for services stored on app.state.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.3
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from tapevaultui.config import Settings
+from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
 from tapevaultui.services.catalog import CatalogRepository
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.job_defs import JobDefStore
@@ -32,6 +33,21 @@ def get_settings(request: Request) -> Settings:
     """
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_transport(
+    request: Request,
+) -> ItDtTransport | FakeItDtTransport:
+    """Return the ITDT transport.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The transport instance created in the app lifespan.
+    """
+    transport: ItDtTransport | FakeItDtTransport = request.app.state.transport
+    return transport
 
 
 def get_drive_service(request: Request) -> DriveService:
@@ -113,6 +129,7 @@ def get_scheduler(request: Request) -> SchedulerService:
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+TransportDep = Annotated[ItDtTransport | FakeItDtTransport, Depends(get_transport)]
 DriveServiceDep = Annotated[DriveService, Depends(get_drive_service)]
 JobDefStoreDep = Annotated[JobDefStore, Depends(get_job_def_store)]
 JobRuntimeDep = Annotated[JobRuntime, Depends(get_job_runtime)]

@@ -6,4 +6,4 @@ Date:   2026-11-06
 Version: v0.5.0
 """
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
