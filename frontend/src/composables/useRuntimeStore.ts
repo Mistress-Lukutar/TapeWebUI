@@ -15,6 +15,10 @@ export interface RuntimeJob {
   error: string
   kind?: string
   hash_mismatches?: number
+  tape_id?: string
+  tape_label?: string
+  tapes_total?: number
+  waiting_for_tape?: string
 }
 
 export interface ScheduleRow {

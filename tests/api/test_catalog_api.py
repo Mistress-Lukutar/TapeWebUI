@@ -87,13 +87,14 @@ def test_history_endpoint(client: TestClient) -> None:
 
 
 def test_restore_plan_and_run(client: TestClient) -> None:
-    """Plan builds from file ids; run is accepted on the fake transport."""
+    """Plan builds from file ids; run waits for the tape and cancels."""
     _, file_ids = _seed(client)
 
     response = client.post("/api/restore/plan", json={"file_ids": file_ids})
     assert response.status_code == 200
     plan = response.json()
-    assert plan["tape_id"] == "uuid-api-tape"
+    assert len(plan["tapes"]) == 1
+    assert plan["tapes"][0]["tape_id"] == "uuid-api-tape"
     assert plan["files_count"] == 2
 
     response = client.post(
@@ -110,18 +111,23 @@ def test_restore_plan_and_run(client: TestClient) -> None:
 
     import time
 
+    # The blank default fake has no matching tape: engine waits for it.
     for _ in range(50):
         status = client.get("/api/restore/status").json()
-        if status["active"] and status["active"]["state"] in (
-            "done",
-            "failed",
-            "cancelled",
-        ):
+        if status["active"] and status["active"]["state"] == "waiting_media":
             break
         time.sleep(0.05)
-    # Wrong tape on the default fake -> failed with a clear error.
-    assert status["active"]["state"] == "failed"
-    assert "Wrong tape" in status["active"]["error"]
+    assert status["active"]["state"] == "waiting_media"
+    assert status["active"]["tape_id"] == "uuid-api-tape"
+
+    response = client.post("/api/restore/cancel")
+    assert response.json()["cancelled"] is True
+    for _ in range(50):
+        status = client.get("/api/restore/status").json()
+        if status["active"] and status["active"]["state"] == "cancelled":
+            break
+        time.sleep(0.05)
+    assert status["active"]["state"] == "cancelled"
 
 
 def test_restore_plan_validation(client: TestClient) -> None:

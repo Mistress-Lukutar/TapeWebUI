@@ -270,3 +270,193 @@ button.danger:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* Catalog explorer (tree design adapted from Synth-Gallery). */
+
+.catalog-layout {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.catalog-layout .panel {
+  margin-bottom: 0;
+}
+
+.cat-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.cat-pane {
+  flex: 1;
+  min-width: 0;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.catalog-toolbar {
+  margin-bottom: 16px;
+}
+
+/* Tree rows: chevron rotation, 16px indent steps, count chips. */
+.tree-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 2px;
+  border-radius: 6px;
+}
+
+.tree-row.active {
+  background: var(--bg-input);
+}
+
+.tree-chevron {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin-right: 2px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.tree-chevron:hover {
+  background: var(--bg);
+}
+
+.tree-chevron svg {
+  width: 14px;
+  height: 14px;
+  stroke: var(--text-dim);
+  transition: stroke 0.15s, transform 0.2s;
+}
+
+.tree-chevron:hover svg {
+  stroke: var(--text);
+}
+
+.tree-chevron.collapsed svg {
+  transform: rotate(-90deg);
+}
+
+.tree-chevron-placeholder {
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-item:hover {
+  background: var(--bg-panel);
+}
+
+.tree-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  stroke: var(--text);
+  transition: stroke 0.2s;
+}
+
+.tree-item:hover .tree-icon {
+  stroke: var(--accent);
+}
+
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.tree-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 20px;
+  text-align: center;
+}
+
+.tree-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.tape-icon {
+  stroke: var(--accent);
+}
+
+.session-icon.session-ok {
+  stroke: var(--accent);
+}
+
+.session-icon.session-partial {
+  stroke: var(--warning);
+}
+
+.session-icon.session-failed,
+.session-icon.session-erased {
+  stroke: var(--danger);
+}
+
+.session-row .tree-name {
+  font-size: 0.82rem;
+}
+
+.crumbs {
+  margin-bottom: 8px;
+}
+
+.crumb {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.crumb:hover {
+  text-decoration: underline;
+}
+
+.crumb.last {
+  color: var(--text);
+  cursor: default;
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 0;
+}

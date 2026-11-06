@@ -3,7 +3,7 @@ File:   models.py
 Brief:  SQLAlchemy 2.0 catalog models (tapes, sessions, files, jobs, runs).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ class BackupSession(Base):
     """One write session on a tape (t0 header + t1..tN files)."""
 
     __tablename__ = "sessions"
+    __table_args__ = (Index("ix_sessions_tape_started", "tape_id", "started_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tape_id: Mapped[int] = mapped_column(ForeignKey("tapes.id"), index=True)
@@ -52,17 +53,27 @@ class BackupSession(Base):
     files_count: Mapped[int] = mapped_column(default=0)
     bytes_total: Mapped[int] = mapped_column(default=0)
     format_version: Mapped[int] = mapped_column(default=1)
+    # Absolute tape position of this session's t0 header (fsf steps from BOP).
+    file_base: Mapped[int] = mapped_column(default=0)
 
 
 class FileEntry(Base):
-    """A source file stored in a session, addressable by tape file index."""
+    """A source file stored in a session, addressable on the tape.
+
+    ``tape_file_index`` is the tape-absolute physical position (fsf steps
+    from BOP); the session header pseudo-entry (path
+    ``<session-header>``) sits at the session's ``file_base``.
+    """
 
     __tablename__ = "files"
-    __table_args__ = (Index("ix_files_session_index", "session_id", "tape_file_index"),)
+    __table_args__ = (
+        Index("ix_files_session_index", "session_id", "tape_file_index"),
+        Index("ix_files_session_path", "session_id", "path"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True)
-    tape_file_index: Mapped[int]  # 0 = session header, source files from 1
+    tape_file_index: Mapped[int]  # tape-absolute position (fsf steps from BOP)
     path: Mapped[str] = mapped_column(String(1024))
     size: Mapped[int] = mapped_column(default=0)
     mtime: Mapped[datetime] = mapped_column(DateTime(timezone=True))

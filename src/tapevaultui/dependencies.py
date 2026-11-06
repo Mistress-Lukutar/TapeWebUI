@@ -3,7 +3,7 @@ File:   dependencies.py
 Brief:  FastAPI dependency accessors for services stored on app.state.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.3
+Version: v0.6.0
 """
 
 from __future__ import annotations

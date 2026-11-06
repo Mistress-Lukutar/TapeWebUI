@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from tapevaultui.config import Settings, get_settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
+from tapevaultui.routers import catalog as catalog_router
 from tapevaultui.routers import device as device_router
 from tapevaultui.routers import jobs as jobs_router
 from tapevaultui.routers import restore as restore_router
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
     app.include_router(device_router.router)
     app.include_router(jobs_router.router)
     app.include_router(tapes_router.router)
+    app.include_router(catalog_router.router)
     app.include_router(restore_router.router)
     app.include_router(schedules_router.router)
 

@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from tapevaultui.db.models import (
@@ -26,6 +26,14 @@ from tapevaultui.db.models import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Path of the t0 session header pseudo-entry in the files table.
+SESSION_HEADER_PATH = "<session-header>"
+# Upper bound for path prefix range scans: every valid UTF-8 string that
+# extends ``prefix`` sorts strictly below ``prefix + _PREFIX_SENTINEL``
+# and at or above ``prefix``, so the (session_id, path) index can be
+# used instead of a case-insensitive LIKE.
+_PREFIX_SENTINEL = "\U0010ffff"
 
 # Conservative native capacity of an LTO-3 cartridge (bytes), used until
 # real consumption is tracked by the catalog.
@@ -212,6 +220,7 @@ class CatalogRepository:
         """
         with self._session_factory() as session:
             tape_seq = _next_tape_seq(session, tape_id)
+            file_base = _next_tape_file_base(session, tape_id)
             record = BackupSession(
                 tape_id=tape_id,
                 tape_seq=tape_seq,
@@ -219,6 +228,7 @@ class CatalogRepository:
                 job_name=job_name,
                 started_at=started_at or _now(),
                 format_version=format_version,
+                file_base=file_base,
             )
             session.add(record)
             session.commit()
@@ -302,7 +312,8 @@ class CatalogRepository:
 
         Args:
             session_id: BackupSession primary key.
-            tape_file_index: Tape file index (0 = header).
+            tape_file_index: Tape-absolute file position (fsf steps from
+                BOP; the session header sits at ``sessions.file_base``).
             path: Source file path.
             size: File size in bytes.
             mtime: Source modification time.
@@ -383,6 +394,87 @@ class CatalogRepository:
         """
         with self._session_factory() as session:
             return session.get(FileEntry, file_id)
+
+    # -- catalog tree browsing --------------------------------------------
+
+    def files_under_prefix(self, session_id: int, prefix: str) -> list[FileEntry]:
+        """Source files of a session whose path starts with ``prefix``.
+
+        The t0 header pseudo-entry is always excluded.
+
+        Args:
+            session_id: BackupSession primary key.
+            prefix: Directory prefix ("" for the whole session).
+
+        Returns:
+            FileEntry rows ordered by path.
+        """
+        with self._session_factory() as session:
+            return list(
+                session.scalars(
+                    select(FileEntry)
+                    .where(
+                        FileEntry.session_id == session_id,
+                        FileEntry.path != SESSION_HEADER_PATH,
+                        FileEntry.path >= prefix,
+                        FileEntry.path < prefix + _PREFIX_SENTINEL,
+                    )
+                    .order_by(FileEntry.path)
+                )
+            )
+
+    def tape_files_under_prefix(
+        self, tape_id: int, prefix: str
+    ) -> list[tuple[FileEntry, BackupSession]]:
+        """Files of all live sessions of a tape under a path prefix.
+
+        Args:
+            tape_id: Tape primary key.
+            prefix: Directory prefix ("" for the whole tape).
+
+        Returns:
+            (FileEntry, BackupSession) pairs ordered by path; erased
+            sessions and header pseudo-entries are excluded.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FileEntry, BackupSession)
+                .join(BackupSession, FileEntry.session_id == BackupSession.id)
+                .where(
+                    BackupSession.tape_id == tape_id,
+                    BackupSession.status != "erased",
+                    FileEntry.path != SESSION_HEADER_PATH,
+                    FileEntry.path >= prefix,
+                    FileEntry.path < prefix + _PREFIX_SENTINEL,
+                )
+                .order_by(FileEntry.path)
+            )
+            return [(entry, record) for entry, record in rows.all()]
+
+    def latest_file_ids_under_prefix(self, tape_id: int, prefix: str) -> list[int]:
+        """Catalog ids of the newest version of each path under a prefix.
+
+        Versions are ranked by session start time (then session id, then
+        file id) across all non-erased sessions of the tape.
+
+        Args:
+            tape_id: Tape primary key.
+            prefix: Directory prefix ("" for the whole tape).
+
+        Returns:
+            FileEntry ids, one per distinct path.
+        """
+        pairs = self.tape_files_under_prefix(tape_id, prefix)
+        latest: dict[str, tuple[FileEntry, BackupSession]] = {}
+        for entry, record in pairs:
+            best = latest.get(entry.path)
+            if best is None or (record.started_at, record.id, entry.id) > (
+                best[1].started_at,
+                best[1].id,
+                best[0].id,
+            ):
+                latest[entry.path] = (entry, record)
+        return [entry.id for entry, _ in latest.values()]
 
     # -- jobs and runs -----------------------------------------------------
 
@@ -536,6 +628,7 @@ class CatalogRepository:
         *,
         status: str | None = None,
         error: str | None = None,
+        session_id: int | None = None,
         stats_json: dict[str, object] | None = None,
         plan_json: dict[str, object] | None = None,
         finished: bool = False,
@@ -546,6 +639,7 @@ class CatalogRepository:
             run_id: JobRun primary key.
             status: New state-machine status.
             error: Error message for failed runs.
+            session_id: Related session id (first session of a restore).
             stats_json: Stats payload.
             plan_json: Plan payload.
             finished: Set finished_at to now.
@@ -561,6 +655,8 @@ class CatalogRepository:
                 record.status = status
             if error is not None:
                 record.error = error
+            if session_id is not None:
+                record.session_id = session_id
             if stats_json is not None:
                 record.stats_json = stats_json
             if plan_json is not None:
@@ -627,8 +723,42 @@ def _next_tape_seq(session: Session, tape_id: int) -> int:
     return max(rows, default=-1) + 1
 
 
+def _next_tape_file_base(session: Session, tape_id: int) -> int:
+    """Compute the absolute tape position for a new session's header.
+
+    The position is the sum of the physical footprints of the tape's
+    live (non-erased) sessions: one filemark-delimited position for each
+    t0 header plus one per recorded source file. Erased sessions are
+    skipped because an erase wipes the whole tape, so the next session
+    starts over at position 0.
+
+    Args:
+        session: Active SQLAlchemy session.
+        tape_id: Tape primary key.
+
+    Returns:
+        Zero-based absolute tape file index for the new t0 header.
+    """
+    live_sessions = session.scalars(
+        select(BackupSession.id).where(
+            BackupSession.tape_id == tape_id,
+            BackupSession.status != "erased",
+        )
+    ).all()
+    base = 0
+    for live_id in live_sessions:
+        files_count = session.scalar(
+            select(func.count(FileEntry.id)).where(
+                FileEntry.session_id == live_id,
+                FileEntry.path != SESSION_HEADER_PATH,
+            )
+        )
+        base += 1 + int(files_count or 0)
+    return base
+
+
 def _session_files_count(session: Session, session_id: int) -> int:
-    """Count source files (index > 0) of a session.
+    """Count source files of a session (header pseudo-entry excluded).
 
     Args:
         session: Active SQLAlchemy session.
@@ -637,14 +767,19 @@ def _session_files_count(session: Session, session_id: int) -> int:
     Returns:
         Number of file entries excluding the header.
     """
-    rows = session.scalars(
-        select(FileEntry.tape_file_index).where(FileEntry.session_id == session_id)
+    return int(
+        session.scalar(
+            select(func.count(FileEntry.id)).where(
+                FileEntry.session_id == session_id,
+                FileEntry.path != SESSION_HEADER_PATH,
+            )
+        )
+        or 0
     )
-    return sum(1 for index in rows if index > 0)
 
 
 def _session_bytes_total(session: Session, session_id: int) -> int:
-    """Sum sizes of source files of a session.
+    """Sum sizes of source files of a session (header excluded).
 
     Args:
         session: Active SQLAlchemy session.
@@ -653,9 +788,12 @@ def _session_bytes_total(session: Session, session_id: int) -> int:
     Returns:
         Total bytes of source files (header excluded).
     """
-    rows = session.execute(
-        select(FileEntry.tape_file_index, FileEntry.size).where(
-            FileEntry.session_id == session_id
+    return int(
+        session.scalar(
+            select(func.coalesce(func.sum(FileEntry.size), 0)).where(
+                FileEntry.session_id == session_id,
+                FileEntry.path != SESSION_HEADER_PATH,
+            )
         )
+        or 0
     )
-    return sum(size for index, size in rows if index > 0)

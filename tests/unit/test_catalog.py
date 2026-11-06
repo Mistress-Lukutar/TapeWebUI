@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tapevaultui.services.catalog import CatalogRepository
+from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def test_session_lifecycle_with_files(repo: CatalogRepository) -> None:
     repo.add_file(
         session.id,
         tape_file_index=0,
-        path="<header>",
+        path=SESSION_HEADER_PATH,
         size=100,
         mtime=mtime,
         sha256="0" * 64,
@@ -102,6 +102,45 @@ def test_tape_seq_increments(repo: CatalogRepository) -> None:
     first = repo.create_session(tape.id)
     second = repo.create_session(tape.id)
     assert (first.tape_seq, second.tape_seq) == (0, 1)
+
+
+def test_second_session_file_base_is_absolute(repo: CatalogRepository) -> None:
+    """A session appended to a tape continues after the previous session.
+
+    Regression guard: the restore engine positions with ``fsf`` from
+    BOP, so the second session on one tape must not reuse indexes
+    0..N — its header sits at the previous session's footprint.
+    """
+    tape = repo.register_tape("uuid-1")
+    mtime = datetime.now(UTC)
+    first = repo.create_session(tape.id, job_name="a")
+    repo.add_file(
+        first.id,
+        tape_file_index=first.file_base,
+        path=SESSION_HEADER_PATH,
+        size=1,
+        mtime=mtime,
+        sha256="0" * 64,
+    )
+    for index in range(3):
+        repo.add_file(
+            first.id,
+            tape_file_index=first.file_base + 1 + index,
+            path=f"D:/a{index}.jpg",
+            size=10,
+            mtime=mtime,
+            sha256="1" * 64,
+        )
+    repo.finish_session(first.id, status="ok")
+
+    second = repo.create_session(tape.id, job_name="a")
+    assert second.tape_seq == 1
+    assert second.file_base == 4  # 1 header + 3 files of the first session
+
+    # After a full erase the tape restarts at position 0.
+    repo.mark_tape_erased(tape.id)
+    third = repo.create_session(tape.id, job_name="a")
+    assert third.file_base == 0
 
 
 def test_mark_tape_erased(repo: CatalogRepository) -> None:

@@ -26,7 +26,7 @@ const pages: { key: Page; label: string }[] = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'jobs', label: 'Jobs' },
   { key: 'tapes', label: 'Tapes' },
-  { key: 'restore', label: 'Restore' },
+  { key: 'restore', label: 'Catalog' },
   { key: 'history', label: 'History' },
 ]
 

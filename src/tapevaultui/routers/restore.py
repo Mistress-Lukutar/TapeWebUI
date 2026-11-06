@@ -3,7 +3,7 @@ File:   restore.py
 Brief:  Restore API: plan, run, cancel, status.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/restore", tags=["restore"])
 async def build_plan(
     payload: RestoreRequest, engine: RestoreEngineDep, catalog: CatalogDep
 ) -> RestorePlan:
-    """Build a restore plan from catalog file ids.
+    """Build a restore plan from file ids and subtree selections.
 
     Args:
         payload: File selection.
@@ -32,13 +32,13 @@ async def build_plan(
         catalog: Catalog repository (unused plan input, reserved).
 
     Returns:
-        The ordered restore plan.
+        The ordered restore plan (one tape group per tape).
 
     Raises:
         HTTPException: 422 on invalid selection.
     """
     try:
-        return engine.build_plan(payload.file_ids)
+        return engine.build_plan(payload.file_ids, payload.selections)
     except RestoreEngineError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -64,12 +64,20 @@ async def run_restore(
     if engine.is_running():
         raise HTTPException(status_code=409, detail="Restore already running")
     try:
-        plan = engine.build_plan(payload.file_ids)
+        plan = engine.build_plan(payload.file_ids, payload.selections)
     except RestoreEngineError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     run = catalog.create_job_run()
-    catalog.update_job_run(run.id, status="running", plan_json=plan.model_dump())
+    first_session = next(
+        (item.session_id for group in plan.tapes for item in group.items), None
+    )
+    catalog.update_job_run(
+        run.id,
+        status="running",
+        plan_json=plan.model_dump(),
+        session_id=first_session,
+    )
     engine.start_run(payload, plan, run.id)
     return {"accepted": True, "run_id": run.id}
 

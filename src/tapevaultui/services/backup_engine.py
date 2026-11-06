@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.3
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtTransport,
 )
-from tapevaultui.services.catalog import CatalogRepository
+from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefinition
 from tapevaultui.services.session_io import (
@@ -288,7 +288,7 @@ class BackupEngine:
                     size=file.size,
                     mtime=file.mtime,
                     sha256=file.sha256,
-                    tape_file_index=seq + 1,
+                    tape_file_index=session.file_base + seq + 1,
                 )
                 for seq, file in enumerate(files)
             ],
@@ -296,8 +296,8 @@ class BackupEngine:
         await write_session_header(self._transport, header, self._work_dir)
         self._catalog.add_file(
             session.id,
-            tape_file_index=0,
-            path="<session-header>",
+            tape_file_index=session.file_base,
+            path=SESSION_HEADER_PATH,
             size=len(serialize_header(header)),
             mtime=datetime.now(UTC),
             sha256="0" * 64,
@@ -345,7 +345,7 @@ class BackupEngine:
                     # retries it on the following tape as a new session.
                     self._catalog.add_file(
                         session.id,
-                        tape_file_index=offset + 1,
+                        tape_file_index=session.file_base + offset + 1,
                         path=file.path,
                         size=file.size,
                         mtime=catalog_mtime,
@@ -359,7 +359,7 @@ class BackupEngine:
                     return files_processed
                 self._catalog.add_file(
                     session.id,
-                    tape_file_index=offset + 1,
+                    tape_file_index=session.file_base + offset + 1,
                     path=file.path,
                     size=file.size,
                     mtime=catalog_mtime,
@@ -375,7 +375,7 @@ class BackupEngine:
 
             self._catalog.add_file(
                 session.id,
-                tape_file_index=offset + 1,
+                tape_file_index=session.file_base + offset + 1,
                 path=file.path,
                 size=file.size,
                 mtime=catalog_mtime,
@@ -396,7 +396,9 @@ class BackupEngine:
         if definition.options.verify == "readback":
             stats.state = "verifying"
             await self.publish(stats)
-            damaged = await self._verify_pass(session.id, files, stats, cancel_check)
+            damaged = await self._verify_pass(
+                session.id, session.file_base, files, stats, cancel_check
+            )
             if damaged:
                 stats.error = (
                     f"readback verification failed for {damaged} file(s); "
@@ -410,6 +412,7 @@ class BackupEngine:
     async def _verify_pass(
         self,
         session_id: int,
+        file_base: int,
         files: list[PlannedFile],
         stats: BackupStats,
         cancel_check: CancelCheckCallback | None,
@@ -422,6 +425,7 @@ class BackupEngine:
 
         Args:
             session_id: Catalog session id for status updates.
+            file_base: Absolute tape position of the session header.
             files: Files written in this pass (tape order).
             stats: Progress accumulator (current_file is updated per file).
             cancel_check: Cooperative cancel check.
@@ -438,7 +442,7 @@ class BackupEngine:
         }
         damaged = 0
         for offset, file in enumerate(files):
-            tape_index = offset + 1
+            tape_index = file_base + offset + 1
             entry = entries.get(tape_index)
             if entry is None or entry.status != "ok":
                 continue
@@ -447,9 +451,9 @@ class BackupEngine:
             stats.current_file = file.path
             await self.publish(stats)
             dest = self._work_dir / f"verify_{tape_index}.bin"
-            # Absolute positioning: space from BOP over tape_index
-            # filemarks. Relative spacing after a previous read drifts
-            # whenever a non-ok file was skipped.
+            # Absolute positioning: space from BOP over the file's
+            # tape-absolute index. Relative spacing after a previous
+            # read drifts whenever a non-ok file was skipped.
             await self._transport.run(["rewind"])
             await self._transport.run(["fsf", str(tape_index)])
             result = await self._transport.run(["read", "-d", str(dest)])
