@@ -3,7 +3,7 @@ File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ File:   test_catalog_browser.py
 Brief:  Catalog explorer grouping tests (listings and subtree selections).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
