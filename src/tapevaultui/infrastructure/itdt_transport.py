@@ -3,7 +3,7 @@ File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.1.1
+Version: v0.2.0
 """
 
 from __future__ import annotations
@@ -240,7 +240,9 @@ class FakeItDtTransport:
 
     Scenario table maps the first subcommand word to a (stdout, exit_code)
     response; every call is recorded in ``commands`` for assertions.
-    Unknown commands fall back to ``default_response``.
+    Unknown commands fall back to ``default_response``. For ``read -d``
+    commands the scenario stdout is also written to the destination file,
+    mimicking ITDT's behavior for downstream code that reads the file.
     """
 
     def __init__(
@@ -274,19 +276,21 @@ class FakeItDtTransport:
     async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
         """Record the call and return the scenario response.
 
+        For ``read -d <path>`` the scenario stdout is written to <path>.
+
         Args:
             args: ITDT subcommand and its arguments.
             timeout_s: Ignored (accepted for interface compatibility).
 
         Returns:
             ItDtResult built from the scenario table.
-
-        Raises:
-            ItDtTransportError: If the scenario response is the sentinel
-                transport error configured in scenarios.
         """
         self.commands.append(tuple(args))
         stdout, exit_code = self.scenarios.get(args[0], self.default_response)
+        if args[0] == "read" and "-d" in args:
+            destination = Path(args[args.index("-d") + 1])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(stdout.encode("utf-8"))
         return ItDtResult(
             args=tuple(self.build_args(args)),
             exit_code=exit_code,

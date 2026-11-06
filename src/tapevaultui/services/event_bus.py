@@ -3,7 +3,7 @@ File:   event_bus.py
 Brief:  Async in-process pub/sub bus (ported from OledWebUI).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.1.1
+Version: v0.2.0
 """
 
 from __future__ import annotations

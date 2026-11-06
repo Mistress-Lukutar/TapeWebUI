@@ -3,7 +3,7 @@ File:   test_api.py
 Brief:  API smoke tests against the app with the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.1.1
+Version: v0.2.0
 """
 
 from __future__ import annotations
