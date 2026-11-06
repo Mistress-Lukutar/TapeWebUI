@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.3.0
+Version: v0.4.0
 """
 
 from __future__ import annotations
@@ -371,6 +371,18 @@ class CatalogRepository:
                     .order_by(FileEntry.tape_file_index)
                 )
             )
+
+    def get_file(self, file_id: int) -> FileEntry | None:
+        """Find a file entry by id.
+
+        Args:
+            file_id: FileEntry primary key.
+
+        Returns:
+            The FileEntry row or None.
+        """
+        with self._session_factory() as session:
+            return session.get(FileEntry, file_id)
 
     # -- jobs and runs -----------------------------------------------------
 

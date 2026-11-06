@@ -3,7 +3,7 @@ File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.3.0
+Version: v0.4.0
 """
 
 from __future__ import annotations
@@ -26,12 +26,15 @@ from tapevaultui.config import Settings, get_settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
 from tapevaultui.routers import device as device_router
 from tapevaultui.routers import jobs as jobs_router
+from tapevaultui.routers import restore as restore_router
+from tapevaultui.routers import tapes as tapes_router
 from tapevaultui.services.backup_engine import BackupEngine
 from tapevaultui.services.catalog import CatalogRepository, sqlite_url_for_path
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefStore
 from tapevaultui.services.job_runtime import JobRuntime
+from tapevaultui.services.restore_engine import RestoreEngine
 from tapevaultui.services.sse_manager import sse_manager
 
 logger = structlog.get_logger(__name__)
@@ -124,8 +127,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         event_bus=event_bus,
     )
     job_defs = JobDefStore(settings.jobs_dir)
+    drive_lock = asyncio.Lock()
     job_runtime = JobRuntime(engine=engine, catalog=catalog, event_bus=event_bus)
     job_runtime.start()
+    restore_engine = RestoreEngine(
+        transport=transport,
+        catalog=catalog,
+        work_dir=settings.data_dir / "tmp",
+        event_bus=event_bus,
+        drive_lock=drive_lock,
+    )
 
     app.state.event_bus = event_bus
     app.state.transport = transport
@@ -133,6 +144,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.catalog = catalog
     app.state.job_defs = job_defs
     app.state.job_runtime = job_runtime
+    app.state.restore_engine = restore_engine
     await drive.start()
 
     yield
@@ -164,6 +176,8 @@ def create_app() -> FastAPI:
 
     app.include_router(device_router.router)
     app.include_router(jobs_router.router)
+    app.include_router(tapes_router.router)
+    app.include_router(restore_router.router)
 
     @app.get("/events")
     async def events() -> StreamingResponse:

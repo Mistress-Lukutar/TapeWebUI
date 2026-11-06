@@ -3,7 +3,7 @@ File:   jobs.py
 Brief:  Jobs API: YAML CRUD, run/cancel, runtime queue status.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.3.0
+Version: v0.4.0
 """
 
 from __future__ import annotations

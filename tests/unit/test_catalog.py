@@ -3,7 +3,7 @@ File:   test_catalog.py
 Brief:  Catalog repository unit tests on in-memory SQLite.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.3.0
+Version: v0.4.0
 """
 
 from __future__ import annotations

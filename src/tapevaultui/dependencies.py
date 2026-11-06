@@ -3,7 +3,7 @@ File:   dependencies.py
 Brief:  FastAPI dependency accessors for services stored on app.state.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.3.0
+Version: v0.4.0
 """
 
 from __future__ import annotations
@@ -13,9 +13,11 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from tapevaultui.config import Settings
+from tapevaultui.services.catalog import CatalogRepository
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.job_defs import JobDefStore
 from tapevaultui.services.job_runtime import JobRuntime
+from tapevaultui.services.restore_engine import RestoreEngine
 
 
 def get_settings(request: Request) -> Settings:
@@ -70,7 +72,35 @@ def get_job_runtime(request: Request) -> JobRuntime:
     return runtime
 
 
+def get_catalog(request: Request) -> CatalogRepository:
+    """Return the catalog repository.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The CatalogRepository instance created in the app lifespan.
+    """
+    catalog: CatalogRepository = request.app.state.catalog
+    return catalog
+
+
+def get_restore_engine(request: Request) -> RestoreEngine:
+    """Return the restore engine.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The RestoreEngine instance created in the app lifespan.
+    """
+    engine: RestoreEngine = request.app.state.restore_engine
+    return engine
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DriveServiceDep = Annotated[DriveService, Depends(get_drive_service)]
 JobDefStoreDep = Annotated[JobDefStore, Depends(get_job_def_store)]
 JobRuntimeDep = Annotated[JobRuntime, Depends(get_job_runtime)]
+CatalogDep = Annotated[CatalogRepository, Depends(get_catalog)]
+RestoreEngineDep = Annotated[RestoreEngine, Depends(get_restore_engine)]
