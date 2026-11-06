@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Runtime data (catalog.db, jobs/, settings.json, logs/)
+data/
+
+# Node
+frontend/node_modules/
+
+# GUI-test evidence artifacts
+gui-test-screenshots/
+
+# Environment
+.env
+.zcode
+.agents

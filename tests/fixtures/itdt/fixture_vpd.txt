@@ -1,0 +1,6 @@
+Getting vpd data from execDevice...
+
+  Manufacturer .............. IBM     
+  Product Identification .... ULTRIUM-TD3     
+  Revision Level ............ 93G0
+Exit with code: 0

@@ -1,0 +1,18 @@
+Querying tape position....
+
+Logical Tape position:
+
+    Partition Number ........... 0
+    Beginning of Partition ..... Yes
+    Leading End of Partition ... No
+    Current Block ID ........... 0 0x00000000
+
+
+Physical Tape position:
+
+    Partition Number ........... 0
+    Beginning of Partition ..... Yes
+    Leading End of Partition ... No
+    Current Block ID ........... 0 0x00000000
+
+Exit with code: 0

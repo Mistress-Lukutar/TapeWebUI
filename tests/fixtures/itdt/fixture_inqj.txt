@@ -1,0 +1,14 @@
+{
+  "command": "inquiry" ,
+  "parameter": {
+    "pageCode": 0 ,
+    "evpd": false
+  } ,
+  "length": 96 ,
+  "data": {
+    "version": "03" ,
+    "vendorIdentification": "IBM     " ,
+    "productIdentification": "ULTRIUM-TD3     " ,
+    "productRevisionLevel": "93G0"
+  }
+}

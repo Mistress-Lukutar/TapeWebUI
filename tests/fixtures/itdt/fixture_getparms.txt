@@ -1,0 +1,6 @@
+Querying tape parameters...
+
+Compression...................Yes     
+Block Size....................65536   
+Buffered Mode.................Yes     
+Exit with code: 0

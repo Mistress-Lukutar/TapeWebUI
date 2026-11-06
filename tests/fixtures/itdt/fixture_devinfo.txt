@@ -1,0 +1,5 @@
+Issuing Get Device Information ...
+devtype = SCSI Tape
+tapetype = Streaming Tape Drive
+block size = 65536
+Exit with code: 0

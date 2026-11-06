@@ -1,0 +1,3 @@
+Querying Dynamic Runtime Information...
+Operation not supported on platform or on device, errno 1: Incorrect function
+Exit with code: 1
