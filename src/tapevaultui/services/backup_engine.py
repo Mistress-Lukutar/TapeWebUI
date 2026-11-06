@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations

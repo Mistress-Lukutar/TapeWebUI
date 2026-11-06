@@ -3,7 +3,7 @@ File:   dependencies.py
 Brief:  FastAPI dependency accessors for services stored on app.state.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.job_defs import JobDefStore
 from tapevaultui.services.job_runtime import JobRuntime
 from tapevaultui.services.restore_engine import RestoreEngine
+from tapevaultui.services.scheduler_service import SchedulerService
 
 
 def get_settings(request: Request) -> Settings:
@@ -98,9 +99,23 @@ def get_restore_engine(request: Request) -> RestoreEngine:
     return engine
 
 
+def get_scheduler(request: Request) -> SchedulerService:
+    """Return the scheduler service.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The SchedulerService instance created in the app lifespan.
+    """
+    scheduler: SchedulerService = request.app.state.scheduler
+    return scheduler
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DriveServiceDep = Annotated[DriveService, Depends(get_drive_service)]
 JobDefStoreDep = Annotated[JobDefStore, Depends(get_job_def_store)]
 JobRuntimeDep = Annotated[JobRuntime, Depends(get_job_runtime)]
 CatalogDep = Annotated[CatalogRepository, Depends(get_catalog)]
 RestoreEngineDep = Annotated[RestoreEngine, Depends(get_restore_engine)]
+SchedulerDep = Annotated[SchedulerService, Depends(get_scheduler)]

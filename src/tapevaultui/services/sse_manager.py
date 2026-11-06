@@ -3,7 +3,7 @@ File:   sse_manager.py
 Brief:  Server-Sent Events fan-out manager (ported from OledWebUI).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations

@@ -143,3 +143,119 @@ button.primary:hover:not(:disabled) {
 .dim {
   color: var(--text-dim);
 }
+
+.mono {
+  font-family: Consolas, monospace;
+}
+
+.error-text {
+  color: var(--danger-text);
+}
+
+/* Top bar with navigation. */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 4px;
+}
+
+.topbar nav button {
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.topbar nav button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sse {
+  margin-left: auto;
+}
+
+.columns {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.columns .half {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Data tables. */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.table th {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.table tr.selected td {
+  background: var(--bg-input);
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+input,
+select,
+textarea {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.yaml-editor {
+  width: 100%;
+  min-height: 320px;
+  font-family: Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}

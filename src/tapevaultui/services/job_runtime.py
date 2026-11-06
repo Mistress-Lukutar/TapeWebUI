@@ -3,7 +3,7 @@ File:   job_runtime.py
 Brief:  Job queue and state machine (exactly one active drive job).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations
@@ -126,6 +126,8 @@ class JobRuntime:
         self._pending.append(entry)
         self._queue.put_nowait(entry)
         self.start()
+        # Mirror the run into the jobs table for the scheduler/UI lists.
+        self._catalog.mark_job_ran(definition.name)
         logger.info("job_enqueued", job=definition.name, run_id=run.id)
         return entry
 
@@ -196,34 +198,48 @@ class JobRuntime:
         except JobCancelled as exc:
             stats.state = "cancelled"
             stats.error = str(exc)
-            self._catalog.update_job_run(
-                entry.run_id, status="cancelled", error=str(exc), finished=True
-            )
+            self._record_terminal(entry, "cancelled", str(exc))
         except TapeFullError as exc:
             stats.state = "failed"
             stats.error = f"{exc} (insert the next tape and retry)"
-            self._catalog.update_job_run(
-                entry.run_id, status="waiting_media", error=str(exc), finished=True
-            )
+            self._record_terminal(entry, "waiting_media", str(exc))
         except BackupEngineError as exc:
             stats.state = "failed"
             stats.error = str(exc)
-            self._catalog.update_job_run(
-                entry.run_id, status="failed", error=str(exc), finished=True
-            )
+            self._record_terminal(entry, "failed", str(exc))
         except Exception as exc:
             logger.exception("job_run_crashed", job=entry.definition.name)
             stats.state = "failed"
             stats.error = str(exc)
-            self._catalog.update_job_run(
-                entry.run_id, status="failed", error=str(exc), finished=True
-            )
+            self._record_terminal(entry, "failed", str(exc))
         else:
             stats.state = "done"
-            self._catalog.update_job_run(
-                entry.run_id, status="done", stats_json=stats.snapshot(), finished=True
-            )
+            self._record_terminal(entry, "done", None, stats_json=stats.snapshot())
         await self._engine.publish(stats)
+
+    def _record_terminal(
+        self,
+        entry: QueueEntry,
+        status: str,
+        error: str | None,
+        stats_json: dict[str, object] | None = None,
+    ) -> None:
+        """Record a terminal run state in the catalog.
+
+        Args:
+            entry: The finished queue entry.
+            status: Terminal status.
+            error: Error message, if any.
+            stats_json: Final stats payload for done runs.
+        """
+        self._catalog.update_job_run(
+            entry.run_id,
+            status=status,
+            error=error,
+            stats_json=stats_json,
+            finished=True,
+        )
+        self._catalog.mark_job_ran(entry.definition.name, status=status)
 
     def _wait_for_media(self, entry: QueueEntry) -> Any:
         """Build the media-wait callback for an entry.

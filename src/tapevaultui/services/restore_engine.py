@@ -3,7 +3,7 @@ File:   restore_engine.py
 Brief:  Restore engine: plan, single-pass tape read, hash-checked write-out.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations

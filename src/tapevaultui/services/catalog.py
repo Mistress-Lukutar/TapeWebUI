@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.4.0
+Version: v0.5.0
 """
 
 from __future__ import annotations
@@ -427,6 +427,43 @@ class CatalogRepository:
                     job.options_json = options_json
                 if schedule_json is not None:
                     job.schedule_json = schedule_json
+            session.commit()
+            return job
+
+    def mark_job_ran(
+        self,
+        name: str,
+        *,
+        at: datetime | None = None,
+        status: str | None = None,
+    ) -> Job:
+        """Record that a job ran (or its run was decided).
+
+        Creates the Job row if missing; updates last_run_at and last_status.
+
+        Args:
+            name: Unique job name.
+            at: Run time (defaults to now UTC).
+            status: Terminal status to record as last_status.
+
+        Returns:
+            The Job row.
+        """
+        with self._session_factory() as session:
+            job = session.scalar(select(Job).where(Job.name == name))
+            if job is None:
+                job = Job(
+                    name=name,
+                    enabled=True,
+                    sources_json={},
+                    options_json={},
+                    schedule_json={},
+                    created_at=_now(),
+                )
+                session.add(job)
+            job.last_run_at = at or _now()
+            if status is not None:
+                job.last_status = status
             session.commit()
             return job
 
