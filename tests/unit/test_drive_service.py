@@ -3,7 +3,7 @@ File:   test_drive_service.py
 Brief:  DriveService unit tests on the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations

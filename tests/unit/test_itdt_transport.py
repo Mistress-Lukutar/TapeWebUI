@@ -3,7 +3,7 @@ File:   test_itdt_transport.py
 Brief:  Unit tests for the real and fake ITDT transports.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations

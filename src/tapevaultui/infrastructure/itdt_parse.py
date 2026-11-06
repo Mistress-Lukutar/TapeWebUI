@@ -3,7 +3,7 @@ File:   itdt_parse.py
 Brief:  Pure parsers for ITDT-SE CLI output (vpd, qrypos, getparms, devinfo, inqj).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations

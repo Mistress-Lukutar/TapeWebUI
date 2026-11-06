@@ -3,11 +3,12 @@ File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,14 +17,21 @@ from typing import Any
 
 import structlog
 import uvicorn
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from tapevaultui.config import Settings, get_settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
 from tapevaultui.routers import device as device_router
+from tapevaultui.routers import jobs as jobs_router
+from tapevaultui.services.backup_engine import BackupEngine
+from tapevaultui.services.catalog import CatalogRepository, sqlite_url_for_path
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.event_bus import EventBus
+from tapevaultui.services.job_defs import JobDefStore
+from tapevaultui.services.job_runtime import JobRuntime
 from tapevaultui.services.sse_manager import sse_manager
 
 logger = structlog.get_logger(__name__)
@@ -104,14 +112,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         event_bus=event_bus,
         poll_interval_s=settings.drive_poll_interval,
     )
+
+    # Catalog: migrations run on every startup (alembic from day one).
+    catalog = CatalogRepository(sqlite_url_for_path(settings.catalog_db_path))
+    await asyncio.to_thread(_upgrade_catalog)
+
+    engine = BackupEngine(
+        transport=transport,
+        catalog=catalog,
+        work_dir=settings.data_dir / "tmp",
+        event_bus=event_bus,
+    )
+    job_defs = JobDefStore(settings.jobs_dir)
+    job_runtime = JobRuntime(engine=engine, catalog=catalog, event_bus=event_bus)
+    job_runtime.start()
+
     app.state.event_bus = event_bus
     app.state.transport = transport
     app.state.drive = drive
+    app.state.catalog = catalog
+    app.state.job_defs = job_defs
+    app.state.job_runtime = job_runtime
     await drive.start()
 
     yield
 
+    await job_runtime.stop()
     await drive.stop()
+
+
+def _upgrade_catalog() -> None:
+    """Run alembic migrations to head on the catalog database.
+
+    Raises:
+        RuntimeError: If the alembic configuration cannot be loaded.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    config = Config(str(project_root / "alembic.ini"))
+    config.set_main_option("script_location", str(project_root / "migrations"))
+    command.upgrade(config, "head")
 
 
 def create_app() -> FastAPI:
@@ -124,6 +163,7 @@ def create_app() -> FastAPI:
     app.state.settings = get_settings()
 
     app.include_router(device_router.router)
+    app.include_router(jobs_router.router)
 
     @app.get("/events")
     async def events() -> StreamingResponse:

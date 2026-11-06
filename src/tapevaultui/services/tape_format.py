@@ -3,7 +3,7 @@ File:   tape_format.py
 Brief:  Tape format protocol: session header (t0) serialization/parsing.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations

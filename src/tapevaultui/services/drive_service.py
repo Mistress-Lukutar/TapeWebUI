@@ -3,7 +3,7 @@ File:   drive_service.py
 Brief:  Drive/media status via ITDT with polling and SSE publication.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations

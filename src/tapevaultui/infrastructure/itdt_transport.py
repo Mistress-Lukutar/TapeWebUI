@@ -3,7 +3,7 @@ File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations
@@ -249,15 +249,21 @@ class FakeItDtTransport:
         self,
         scenarios: dict[str, tuple[str, int]] | None = None,
         *,
+        command_scenarios: dict[tuple[str, ...], tuple[str, int]] | None = None,
         default_response: tuple[str, int] = ("", 0),
     ) -> None:
         """Initialize the fake.
 
         Args:
             scenarios: Mapping from subcommand word to (stdout, exit_code).
+            command_scenarios: Exact full-command matches (checked first),
+                e.g. ``("write", "-raw", "-s", "D:/a.txt")``.
             default_response: Response for subcommands not in scenarios.
         """
         self.scenarios = scenarios if scenarios is not None else {}
+        self.command_scenarios = (
+            command_scenarios if command_scenarios is not None else {}
+        )
         self.default_response = default_response
         self.commands: list[tuple[str, ...]] = []
         self.device_name = "\\\\.\\tape0"
@@ -286,7 +292,11 @@ class FakeItDtTransport:
             ItDtResult built from the scenario table.
         """
         self.commands.append(tuple(args))
-        stdout, exit_code = self.scenarios.get(args[0], self.default_response)
+        key = tuple(args)
+        if key in self.command_scenarios:
+            stdout, exit_code = self.command_scenarios[key]
+        else:
+            stdout, exit_code = self.scenarios.get(args[0], self.default_response)
         if args[0] == "read" and "-d" in args:
             destination = Path(args[args.index("-d") + 1])
             destination.parent.mkdir(parents=True, exist_ok=True)

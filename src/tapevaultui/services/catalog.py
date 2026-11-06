@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.2.0
+Version: v0.3.0
 """
 
 from __future__ import annotations
@@ -453,6 +453,33 @@ class CatalogRepository:
             session.add(record)
             session.commit()
             return record
+
+    def get_job_run(self, run_id: int) -> JobRun | None:
+        """Find a job run by id.
+
+        Args:
+            run_id: JobRun primary key.
+
+        Returns:
+            The JobRun row or None.
+        """
+        with self._session_factory() as session:
+            return session.get(JobRun, run_id)
+
+    def list_job_runs(self, job_id: int | None = None) -> list[JobRun]:
+        """List job runs, newest first (optionally filtered by job).
+
+        Args:
+            job_id: Optional job filter.
+
+        Returns:
+            List of JobRun rows.
+        """
+        with self._session_factory() as session:
+            statement = select(JobRun).order_by(JobRun.id.desc())
+            if job_id is not None:
+                statement = statement.where(JobRun.job_id == job_id)
+            return list(session.scalars(statement))
 
     def update_job_run(
         self,
