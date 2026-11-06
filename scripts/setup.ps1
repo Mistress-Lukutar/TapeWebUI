@@ -49,7 +49,7 @@ $itdt = 'C:\Program Files\ITDT\itdt.exe'
 if (Test-Path $itdt) {
   Write-Host "ITDT found: $itdt" -ForegroundColor Green
 } else {
-  Write-Warning "ITDT not found at $itdt — set TAPE_ITDT_EXE in .env"
+  Write-Warning "ITDT not found at $itdt - set TAPE_ITDT_EXE in .env"
 }
 
 # --- Scheduled task (elevated logon task, restart-on-death supervisor) ---
