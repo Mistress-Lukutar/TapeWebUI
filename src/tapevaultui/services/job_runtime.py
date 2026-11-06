@@ -214,7 +214,19 @@ class JobRuntime:
             self._record_terminal(entry, "failed", str(exc))
         else:
             stats.state = "done"
-            self._record_terminal(entry, "done", None, stats_json=stats.snapshot())
+            if stats.error:
+                # e.g. readback verification damaged files: the job ran
+                # through, but the UI must not show a clean success.
+                self._record_terminal(
+                    entry,
+                    "done_with_errors",
+                    stats.error,
+                    stats_json=stats.snapshot(),
+                )
+            else:
+                self._record_terminal(
+                    entry, "done", None, stats_json=stats.snapshot()
+                )
         await self._engine.publish(stats)
 
     def _record_terminal(

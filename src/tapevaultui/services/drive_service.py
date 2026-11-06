@@ -3,7 +3,7 @@ File:   drive_service.py
 Brief:  Drive/media status via ITDT with polling and SSE publication.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.2
 """
 
 from __future__ import annotations
@@ -156,6 +156,11 @@ class DriveService:
     async def refresh_and_publish(self) -> DriveStatus:
         """Query status and publish it if anything changed.
 
+        The published payload is the FULL snapshot (including
+        ``updated_at``, JSON-encoded): the UI renders the timestamp
+        directly, so omitting it crashes the dashboard on every event.
+        Change detection still compares the significant state only.
+
         Returns:
             The fresh DriveStatus snapshot.
         """
@@ -164,7 +169,7 @@ class DriveService:
         current = status.significant_state()
         if current != previous:
             self._previous_significant = current
-            await self._event_bus.publish(DRIVE_TOPIC, current)
+            await self._event_bus.publish(DRIVE_TOPIC, status.model_dump(mode="json"))
             logger.info(
                 "drive_status_changed",
                 reachable=status.reachable,

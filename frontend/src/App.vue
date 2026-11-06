@@ -16,10 +16,9 @@ const page = ref<Page>('dashboard')
 
 const status = computed(() => drive.state.status)
 const lastUpdated = computed(() => {
-  if (!status.value) return '—'
-  const iso = status.value.updated_at.endsWith('Z')
-    ? status.value.updated_at
-    : status.value.updated_at + 'Z'
+  const updated = status.value?.updated_at
+  if (!updated) return '—'
+  const iso = updated.endsWith('Z') ? updated : updated + 'Z'
   return new Date(iso).toLocaleString('en-GB', { hour12: false })
 })
 
@@ -106,6 +105,9 @@ onMounted(() => {
         <dt>Speed</dt><dd>{{ formatBytes(runtime.state.job.speed_bps) }}/s</dd>
         <dt>ETA</dt><dd>{{ runtime.state.job.eta_s !== null ? `${runtime.state.job.eta_s} s` : '—' }}</dd>
         <dt>Current file</dt><dd class="mono">{{ runtime.state.job.current_file || '—' }}</dd>
+        <template v-if="runtime.state.job.hash_mismatches">
+          <dt>Damaged</dt><dd class="error-text">{{ runtime.state.job.hash_mismatches }}</dd>
+        </template>
         <dt v-if="runtime.state.job.error">Error</dt>
         <dd v-if="runtime.state.job.error" class="error-text">{{ runtime.state.job.error }}</dd>
       </div>

@@ -3,7 +3,7 @@ File:   test_drive_service.py
 Brief:  DriveService unit tests on the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.2
 """
 
 from __future__ import annotations
@@ -112,3 +112,29 @@ async def test_polling_publishes_state_flip() -> None:
 
     assert len(events) == 2
     assert events[1]["reachable"] is False
+
+
+async def test_published_payload_includes_updated_at() -> None:
+    """SSE payloads carry updated_at (the UI renders it directly)."""
+    events: list[dict[str, object]] = []
+
+    async def collect(payload: dict[str, object]) -> None:
+        events.append(payload)
+
+    bus = EventBus()
+    bus.subscribe("drive", collect)
+    fake = FakeItDtTransport(
+        scenarios={
+            "vpd": (load_fixture("fixture_vpd.txt"), 0),
+            "qrypos": (load_fixture("fixture_qrypos.txt"), 0),
+            "getparms": (load_fixture("fixture_getparms.txt"), 0),
+        }
+    )
+    service = DriveService(fake, bus, poll_interval_s=60.0)
+
+    await service.refresh_and_publish()
+
+    assert len(events) == 1
+    # Regression: significant_state() alone omits updated_at, which made
+    # the dashboard crash on "undefined.endsWith".
+    assert "updated_at" in events[0]

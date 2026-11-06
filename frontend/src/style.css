@@ -118,11 +118,17 @@ button.primary:hover:not(:disabled) {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .badge.ok {
   background: rgba(53, 201, 142, 0.15);
   color: var(--accent);
+}
+
+.badge.warn {
+  background: rgba(240, 166, 54, 0.15);
+  color: #f0a636;
 }
 
 .badge.fail {
@@ -215,6 +221,11 @@ button.primary:hover:not(:disabled) {
 .table th {
   color: var(--text-dim);
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.table td.nowrap {
+  white-space: nowrap;
 }
 
 .table tr.selected td {

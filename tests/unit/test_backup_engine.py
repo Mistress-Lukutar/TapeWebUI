@@ -123,13 +123,17 @@ async def test_verify_readback_updates_files(tmp_path: Path) -> None:
     fake = FakeItDtTransport()
     repo = _make_repo()
     engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
-    await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+    stats = BackupStats("testjob")
+    await engine.execute(_definition(tmp_path), stats)
 
     verify_commands = [cmd for cmd in fake.commands if cmd[0] in ("fsf", "read")]
     assert any(cmd[0] == "fsf" and cmd[1] == "1" for cmd in verify_commands)
     sessions = repo.list_sessions(repo.list_tapes()[0].id)
     files = repo.list_files(sessions[0].id)
     assert files[1].status == "damaged"  # fake read returned header text
+    # Verify damage must be visible in the stats (no silent "done").
+    assert stats.hash_mismatches == 1
+    assert "verification failed" in stats.error
 
 
 async def test_verify_readback_ok_when_content_matches(tmp_path: Path) -> None:

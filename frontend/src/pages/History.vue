@@ -16,6 +16,11 @@ interface RunRow {
 const runs = ref<RunRow[]>([])
 const error = ref('')
 
+function shorten(text: string | null, max = 160): string {
+  if (!text) return ''
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 async function load(): Promise<void> {
   try {
     runs.value = await apiGet<RunRow[]>('/api/history?limit=200')
@@ -40,11 +45,16 @@ onMounted(load)
       <tbody>
         <tr v-if="!runs.length"><td colspan="5" class="dim">No runs recorded yet.</td></tr>
         <tr v-for="run in runs" :key="run.id">
-          <td>#{{ run.id }}<span v-if="run.job_id" class="dim"> (job {{ run.job_id }})</span></td>
-          <td>{{ formatIso(run.started_at) }}</td>
-          <td>{{ formatIso(run.finished_at) }}</td>
-          <td><span class="badge" :class="run.status === 'done' ? 'ok' : 'fail'">{{ run.status }}</span></td>
-          <td class="error-text">{{ run.error || '' }}</td>
+          <td class="nowrap">#{{ run.id }}<span v-if="run.job_id" class="dim"> (job {{ run.job_id }})</span></td>
+          <td class="nowrap">{{ formatIso(run.started_at) }}</td>
+          <td class="nowrap">{{ formatIso(run.finished_at) }}</td>
+          <td>
+            <span
+              class="badge"
+              :class="run.status === 'done' ? 'ok' : run.status === 'done_with_errors' ? 'warn' : 'fail'"
+            >{{ run.status }}</span>
+          </td>
+          <td class="error-text" :title="run.error || ''">{{ shorten(run.error) }}</td>
         </tr>
       </tbody>
     </table>

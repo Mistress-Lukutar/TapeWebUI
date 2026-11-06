@@ -100,6 +100,9 @@ class BackupStats:
         self.current_file_started: float | None = None
         self.tape_id = ""
         self.session_id = ""
+        # Files damaged during readback verification (read failure or
+        # hash mismatch); mirrors the restore stats field of the same name.
+        self.hash_mismatches = 0
         self.started_monotonic = time.monotonic()
         self.error = ""
 
@@ -133,6 +136,7 @@ class BackupStats:
             "current_file": self.current_file,
             "tape_id": self.tape_id,
             "session_id": self.session_id,
+            "hash_mismatches": self.hash_mismatches,
             "speed_bps": round(speed, 1),
             "eta_s": round(eta) if eta is not None else None,
             "elapsed_s": round(elapsed, 1),
@@ -377,7 +381,12 @@ class BackupEngine:
         if definition.options.verify == "readback":
             stats.state = "verifying"
             await self.publish(stats)
-            await self._verify_pass(session.id, files, stats, cancel_check)
+            damaged = await self._verify_pass(session.id, files, stats, cancel_check)
+            if damaged:
+                stats.error = (
+                    f"readback verification failed for {damaged} file(s); "
+                    "they are marked damaged in the catalog"
+                )
         await self.publish(stats)
 
         self._catalog.finish_session(session.id, status="ok")
@@ -389,14 +398,21 @@ class BackupEngine:
         files: list[PlannedFile],
         stats: BackupStats,
         cancel_check: CancelCheckCallback | None,
-    ) -> None:
+    ) -> int:
         """Re-read written files and compare sha256 against the plan.
+
+        Publishes per-file progress (state stays ``verifying``) so the UI
+        shows the phase; every damaged file increments
+        ``stats.hash_mismatches``.
 
         Args:
             session_id: Catalog session id for status updates.
             files: Files written in this pass (tape order).
-            stats: Progress accumulator (unused, kept for event symmetry).
+            stats: Progress accumulator (current_file is updated per file).
             cancel_check: Cooperative cancel check.
+
+        Returns:
+            Number of files marked damaged during verification.
 
         Raises:
             JobCancelled: On cancellation.
@@ -406,6 +422,7 @@ class BackupEngine:
             for entry in self._catalog.list_files(session_id)
         }
         await self._transport.run(["rewind"])
+        damaged = 0
         for offset, file in enumerate(files):
             tape_index = offset + 1
             entry = entries.get(tape_index)
@@ -413,19 +430,26 @@ class BackupEngine:
                 continue
             if cancel_check and cancel_check():
                 raise JobCancelled("cancelled during verification")
+            stats.current_file = file.path
+            await self.publish(stats)
             dest = self._work_dir / f"verify_{tape_index}.bin"
             await self._transport.run(["fsf", str(tape_index)])
             result = await self._transport.run(["read", "-d", str(dest)])
             if result.exit_code != 0:
                 self._catalog.mark_file_status(entry.id, "damaged")
+                stats.hash_mismatches += 1
+                damaged += 1
                 logger.warning("verify_read_failed", path=file.path)
                 continue
             actual = await asyncio.to_thread(sha256_of, dest)
             dest.unlink(missing_ok=True)
             if actual != file.sha256:
                 self._catalog.mark_file_status(entry.id, "damaged")
+                stats.hash_mismatches += 1
+                damaged += 1
                 logger.warning("verify_hash_mismatch", path=file.path)
         await self._transport.run(["rewind"])
+        return damaged
 
     async def media_ready(self, old_tape_id: str) -> bool:
         """Check the drive for usable media (waiting_media poll helper).
