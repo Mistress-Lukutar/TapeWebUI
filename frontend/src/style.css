@@ -146,6 +146,16 @@ button.primary:hover:not(:disabled) {
   font-size: 13px;
 }
 
+.info-strip {
+  background: rgba(240, 166, 54, 0.1);
+  color: #f0a636;
+  border: 1px solid rgba(240, 166, 54, 0.4);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
 .dim {
   color: var(--text-dim);
 }

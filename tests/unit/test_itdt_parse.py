@@ -3,7 +3,7 @@ File:   test_itdt_parse.py
 Brief:  Parser unit tests on real captured ITDT output fixtures.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import pytest
 
 from tapevaultui.infrastructure.itdt_parse import (
     ItDtParseError,
+    is_medium_not_present,
     is_open_failure,
     parse_device_statistics,
     parse_devinfo,
@@ -137,3 +138,33 @@ def test_parse_device_statistics_missing_table() -> None:
     """Output without a statistics table raises ItDtParseError."""
     with pytest.raises(ItDtParseError, match="Device Statistics"):
         parse_device_statistics("Operation not supported, errno 1\n")
+
+
+def test_is_medium_not_present_sense_3a() -> None:
+    """Empty-drive qrypos failure with 3A/00 sense is medium-not-present."""
+    assert is_medium_not_present(load_fixture("fixture_qrypos_no_medium.txt"))
+
+
+def test_is_medium_not_present_initializing_sense() -> None:
+    """The 04/02 (NOT READY, initializing) variant is also classified."""
+    assert is_medium_not_present(
+        load_fixture("fixture_qrypos_no_medium_initializing.txt")
+    )
+
+
+def test_is_medium_not_present_text_form() -> None:
+    """An explicit textual report is recognized without a sense dump."""
+    assert is_medium_not_present("Operation FAILED: MEDIUM NOT PRESENT\n")
+
+
+def test_is_medium_not_present_healthy_output() -> None:
+    """Healthy qrypos/vpd output is not classified as empty drive."""
+    assert not is_medium_not_present(load_fixture("fixture_qrypos.txt"))
+    assert not is_medium_not_present(load_fixture("fixture_vpd.txt"))
+
+
+def test_is_medium_not_present_open_failure() -> None:
+    """A plain open failure (no sense data) is not medium-not-present."""
+    assert not is_medium_not_present(
+        "Open failed: The system cannot find the file specified\n"
+    )

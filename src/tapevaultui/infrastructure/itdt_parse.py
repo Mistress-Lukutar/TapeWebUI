@@ -3,7 +3,7 @@ File:   itdt_parse.py
 Brief:  Pure parsers for ITDT-SE CLI output (vpd, qrypos, getparms, inqj, devstat).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -298,6 +298,63 @@ def parse_device_statistics(text: str) -> dict[str, str]:
     if not stats:
         raise ItDtParseError("Device Statistics table not found in output")
     return stats
+
+
+_SENSE_ROW_RE = re.compile(
+    r"^\s*(?P<offset>[0-9A-Fa-f]{4})\s+-\s+(?P<hex>.+?)\s+\[", re.MULTILINE
+)
+
+
+def _sense_bytes_from_dump(text: str) -> bytes:
+    """Extract bytes from an ITDT sense-data hex dump.
+
+    The dump looks like::
+
+        0000 - 7000 0200 0000 0058 0000 0000 3A00 3100  [p......X....:.1.]
+
+    Only rows whose offset is a 4-digit hex number are considered; the
+    trailing ASCII-art column (``[...]``) is ignored.
+
+    Args:
+        text: ITDT output containing (or not containing) a sense dump.
+
+    Returns:
+        The concatenated dump bytes (empty if no dump rows found).
+    """
+    data = bytearray()
+    for match in _SENSE_ROW_RE.finditer(text):
+        for token in match.group("hex").split():
+            if re.fullmatch(r"[0-9A-Fa-f]{4}", token):
+                data.extend(bytes.fromhex(token))
+    return bytes(data)
+
+
+def is_medium_not_present(text: str) -> bool:
+    """Check whether ITDT output reports an empty drive (no cartridge).
+
+    Detects either an explicit "medium not present" report or a SCSI
+    fixed-format sense dump whose ASC/ASCQ signals an absent medium:
+    ``3A/xx`` (MEDIUM NOT PRESENT), or ``04/00``-style NOT READY /
+    initializing states — on this drive (ULTRIUM-TD3, fw 93G0) an empty
+    drive alternates between ``3A/00`` and ``04/02`` for ``qrypos``.
+
+    Args:
+        text: ITDT command output (e.g. a failed ``qrypos``).
+
+    Returns:
+        True if the output indicates that no cartridge is loaded.
+    """
+    if "medium not present" in text.lower():
+        return True
+    sense = _sense_bytes_from_dump(text)
+    if len(sense) < 14 or sense[0] & 0x7F not in (0x70, 0x71):
+        return False
+    asc, ascq = sense[12], sense[13]
+    if asc == 0x3A:  # MEDIUM NOT PRESENT (any ASCQ)
+        return True
+    # NOT READY: initializing required / cause not reportable — observed
+    # on the empty drive right after unloading a cartridge.
+    return sense[2] == 0x02 and asc == 0x04 and ascq in (0x00, 0x02)
 
 
 def is_open_failure(text: str) -> bool:

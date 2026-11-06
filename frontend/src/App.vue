@@ -120,8 +120,11 @@ onMounted(() => {
             <div v-if="status" class="kv-grid">
               <dt>State</dt>
               <dd>
-                <span class="badge" :class="status.reachable ? 'ok' : 'fail'">
-                  {{ status.reachable ? 'Reachable' : 'Unreachable' }}
+                <span
+                  class="badge"
+                  :class="status.reachable ? (status.no_medium ? 'warn' : 'ok') : 'fail'"
+                >
+                  {{ status.reachable ? (status.no_medium ? 'No cartridge' : 'Reachable') : 'Unreachable' }}
                 </span>
               </dd>
               <dt>Drive</dt>
@@ -137,6 +140,7 @@ onMounted(() => {
                   partition {{ status.partition }}, block {{ status.block_id }}
                   <span v-if="status.at_beginning_of_partition" class="dim"> (BOP)</span>
                 </template>
+                <template v-else-if="status.no_medium">no cartridge loaded</template>
                 <template v-else>—</template>
               </dd>
               <dt>Compression</dt>
@@ -145,7 +149,11 @@ onMounted(() => {
               <dd>{{ lastUpdated }}</dd>
             </div>
             <div v-else class="dim">Loading drive status…</div>
-            <div v-if="status?.error" class="error-strip">{{ status.error }}</div>
+            <div v-if="status?.no_medium" class="info-strip">
+              No cartridge loaded in the drive. Position and compression
+              become available after a tape is inserted.
+            </div>
+            <div v-else-if="status?.error" class="error-strip">{{ status.error }}</div>
             <div style="margin-top: 12px">
               <button class="primary" :disabled="drive.state.loading" @click="drive.refresh()">
                 Refresh now

@@ -3,7 +3,7 @@ File:   drive_service.py
 Brief:  Drive/media status via ITDT with polling and SSE publication.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from tapevaultui.infrastructure.itdt_parse import (
     ItDtParseError,
+    is_medium_not_present,
     parse_getparms,
     parse_qrypos,
     parse_vpd,
@@ -37,6 +38,7 @@ class DriveStatus(BaseModel):
     """Snapshot of drive and media state, safe to serialize to the UI."""
 
     reachable: bool
+    no_medium: bool = False
     manufacturer: str | None = None
     product_id: str | None = None
     revision: str | None = None
@@ -98,7 +100,9 @@ class DriveService:
 
         All three commands are queried sequentially; a failure of any one
         marks the drive unreachable for this snapshot (partial data of
-        successful commands is still filled in).
+        successful commands is still filled in). A failure whose sense
+        data reports "medium not present" is classified as ``no_medium``
+        instead: the drive is healthy, just no cartridge is loaded.
 
         Returns:
             The fresh DriveStatus snapshot.
@@ -129,6 +133,8 @@ class DriveService:
                 status.at_beginning_of_partition = (
                     position.logical.at_beginning_of_partition
                 )
+            elif status.reachable and is_medium_not_present(qrypos_result.stdout):
+                status.no_medium = True
             elif status.reachable:
                 status.reachable = False
                 status.error = qrypos_result.stdout.strip() or "qrypos failed"
@@ -143,6 +149,8 @@ class DriveService:
                 status.compression = parms.compression
                 status.parms_block_size = parms.block_size
                 status.buffered_mode = parms.buffered_mode
+            elif status.reachable and is_medium_not_present(parms_result.stdout):
+                status.no_medium = True
             elif status.reachable:
                 status.reachable = False
                 status.error = parms_result.stdout.strip() or "getparms failed"
@@ -170,11 +178,15 @@ class DriveService:
         if current != previous:
             self._previous_significant = current
             await self._event_bus.publish(DRIVE_TOPIC, status.model_dump(mode="json"))
-            logger.info(
-                "drive_status_changed",
-                reachable=status.reachable,
-                error=status.error,
-            )
+            if status.no_medium:
+                # Expected state (drive healthy, empty): no sense dump spam.
+                logger.info("drive_status_changed", no_medium=True)
+            else:
+                logger.info(
+                    "drive_status_changed",
+                    reachable=status.reachable,
+                    error=status.error,
+                )
         return status
 
     def update_poll_interval(self, interval_s: float) -> None:

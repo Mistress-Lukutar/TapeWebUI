@@ -4,6 +4,7 @@ import { reactive } from 'vue'
 
 export interface DriveStatus {
   reachable: boolean
+  no_medium: boolean
   manufacturer: string | null
   product_id: string | null
   revision: string | null
