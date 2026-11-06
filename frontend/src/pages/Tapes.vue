@@ -95,31 +95,31 @@ onMounted(load)
 <template>
   <h2>Tapes</h2>
 
-  <div class="panel">
-    <h3>Catalog search</h3>
-    <div class="row-actions">
-      <input v-model="query" placeholder="path substring…" @keyup.enter="search()" />
-      <button class="primary" @click="search()">Search</button>
-      <button @click="query = ''; hits = null">Clear</button>
-    </div>
-    <table v-if="hits" class="table" style="margin-top: 8px">
-      <thead>
-        <tr><th>Path</th><th>Tape</th><th>Session</th><th>Size</th><th>Status</th></tr>
-      </thead>
-      <tbody>
-        <tr v-if="!hits.length"><td colspan="5" class="dim">No matches.</td></tr>
-        <tr v-for="hit in hits" :key="hit.file.id">
-          <td class="mono">{{ hit.file.path }}</td>
-          <td>{{ hit.tape_label || hit.tape_uuid.slice(0, 8) }}</td>
-          <td>#{{ hit.session.tape_seq }} {{ hit.session.job_name }}</td>
-          <td>{{ formatBytes(hit.file.size) }}</td>
-          <td>{{ hit.file.status }}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
   <div class="columns">
+    <div class="panel half">
+      <h3>Catalog search</h3>
+      <div class="row-actions">
+        <input v-model="query" placeholder="path substring…" @keyup.enter="search()" />
+        <button class="primary" @click="search()">Search</button>
+        <button @click="query = ''; hits = null">Clear</button>
+      </div>
+      <table v-if="hits" class="table" style="margin-top: 8px">
+        <thead>
+          <tr><th>Path</th><th>Tape</th><th>Session</th><th>Size</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr v-if="!hits.length"><td colspan="5" class="dim">No matches.</td></tr>
+          <tr v-for="hit in hits" :key="hit.file.id">
+            <td class="mono">{{ hit.file.path }}</td>
+            <td>{{ hit.tape_label || hit.tape_uuid.slice(0, 8) }}</td>
+            <td>#{{ hit.session.tape_seq }} {{ hit.session.job_name }}</td>
+            <td>{{ formatBytes(hit.file.size) }}</td>
+            <td>{{ hit.file.status }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="panel half">
       <h3>Tapes</h3>
       <table class="table">
@@ -141,38 +141,38 @@ onMounted(load)
       </table>
       <p v-if="error" class="error-strip">{{ error }}</p>
     </div>
+  </div>
 
-    <div class="panel half" v-if="details">
-      <h3>{{ details.label || details.uuid.slice(0, 8) }} — sessions</h3>
-      <table class="table">
-        <thead>
-          <tr><th>#</th><th>Job</th><th>Started</th><th>Files</th><th>Bytes</th><th>Status</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="session in details.sessions" :key="session.id">
-            <td>{{ session.tape_seq }}</td>
-            <td>{{ session.job_name }}</td>
-            <td>{{ formatIso(session.started_at) }}</td>
-            <td>{{ session.files_count }}</td>
-            <td>{{ formatBytes(session.bytes_total) }}</td>
-            <td>{{ session.status }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <h3 style="margin-top: 12px">Files</h3>
-      <table class="table">
-        <thead>
-          <tr><th>t#</th><th>Path</th><th>Size</th><th>Status</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="file in files" :key="file.id">
-            <td>{{ file.tape_file_index }}</td>
-            <td class="mono">{{ file.path }}</td>
-            <td>{{ formatBytes(file.size) }}</td>
-            <td>{{ file.status }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+  <div class="panel" v-if="details">
+    <h3>{{ details.label || details.uuid.slice(0, 8) }} — sessions</h3>
+    <table class="table">
+      <thead>
+        <tr><th>#</th><th>Job</th><th>Started</th><th>Files</th><th>Bytes</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="session in details.sessions" :key="session.id">
+          <td>{{ session.tape_seq }}</td>
+          <td>{{ session.job_name }}</td>
+          <td>{{ formatIso(session.started_at) }}</td>
+          <td>{{ session.files_count }}</td>
+          <td>{{ formatBytes(session.bytes_total) }}</td>
+          <td>{{ session.status }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 style="margin-top: 12px">Files</h3>
+    <table class="table">
+      <thead>
+        <tr><th>t#</th><th>Path</th><th>Size</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="file in files" :key="file.id">
+          <td>{{ file.tape_file_index }}</td>
+          <td class="mono">{{ file.path }}</td>
+          <td>{{ formatBytes(file.size) }}</td>
+          <td>{{ file.status }}</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </template>
