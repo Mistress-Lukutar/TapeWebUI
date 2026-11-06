@@ -3,7 +3,7 @@ File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.2
 """
 
 from __future__ import annotations
@@ -231,6 +231,40 @@ async def test_tape_full_without_media_callback(tmp_path: Path) -> None:
 
     sessions = repo.list_sessions(repo.list_tapes()[0].id)
     assert sessions[0].status == "partial"
+
+
+async def test_no_media_waits_then_proceeds(tmp_path: Path) -> None:
+    """An empty drive enters waiting_media and resumes once media is in."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    no_media_rewind = (
+        "Rewinding tape...\n"
+        "Operation FAILED with errno 2 The system cannot find the file specified"
+    )
+    fake = FakeItDtTransport(command_scenarios={("rewind",): (no_media_rewind, 2)})
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+
+    async def wait_for_media() -> bool:
+        # Inside the callback the engine has published waiting_media and
+        # the drive is still empty; the poll must report "not ready".
+        assert stats.state == "waiting_media"
+        assert not await engine.media_ready("")
+        # The operator loads a (blank) cartridge; retry succeeds.
+        fake.command_scenarios.clear()
+        return True
+
+    stats = await engine.execute(
+        _definition(tmp_path, verify="none"),
+        stats,
+        wait_for_media=wait_for_media,
+    )
+    assert stats.state == "writing"
+    assert stats.files_done == 1
+    assert repo.list_tapes()[0].id  # blank cartridge was claimed
 
 
 def test_hash_helper_matches_snapshot(tmp_path: Path) -> None:

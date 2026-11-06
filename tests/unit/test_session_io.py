@@ -3,7 +3,7 @@ File:   test_session_io.py
 Brief:  Session header I/O helper tests on the fake transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.1
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
 from tapevaultui.services.session_io import (
+    NoMediaError,
     SessionIoError,
     erase_tape_short,
     identify_tape,
@@ -46,6 +47,26 @@ def _header() -> SessionHeader:
         job_name="photos",
         started_at=datetime.now(UTC),
     )
+
+
+# Real ITDT output observed on this machine for a read at BOP of a
+# never-written cartridge (blank-check sense, errno 1117, zero records).
+BLANK_READ_OUTPUT = (
+    "Initializing device...\n"
+    "Read Exerciser...\n"
+    "Reading file from tape...\n"
+    "Read complete, 0 records 0 total bytes read...\n"
+    "Operation failed with errno 1117: The request could not be performed "
+    "because of an I/O device error\n"
+    "Exit with code: 1117"
+)
+
+# Real ITDT output observed for a rewind with the cartridge ejected but
+# loadable (sense key 0x02 not-ready, ASC/ASCQ 04/02).
+NO_MEDIA_REWIND_OUTPUT = (
+    "Rewinding tape...\n"
+    "Operation FAILED with errno 2 The system cannot find the file specified"
+)
 
 
 async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
@@ -97,6 +118,28 @@ async def test_read_header_rewinds_after_read_failure(tmp_path: Path) -> None:
     with pytest.raises(SessionIoError):
         await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
     assert fake.commands[-1] == ("rewind",)
+
+
+async def test_read_header_blank_tape_returns_none(tmp_path: Path) -> None:
+    """A never-written tape (blank-check read failure) yields None."""
+    fake = FakeItDtTransport(scenarios={"read": (BLANK_READ_OUTPUT, 1117)})
+    parsed = await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+    assert parsed is None
+    assert fake.commands[-1] == ("rewind",)  # left rewound after failure
+
+
+async def test_rewind_without_media_raises_no_media_error(
+    tmp_path: Path,
+) -> None:
+    """A rewind failure with the cartridge ejected raises NoMediaError."""
+    fake = FakeItDtTransport(scenarios={"rewind": (NO_MEDIA_REWIND_OUTPUT, 2)})
+    with pytest.raises(NoMediaError, match="no loaded medium"):
+        await read_session_header(fake, tmp_path)  # type: ignore[arg-type]
+
+
+def test_no_media_error_is_session_io_error() -> None:
+    """NoMediaError stays catchable as a plain SessionIoError."""
+    assert issubclass(NoMediaError, SessionIoError)
 
 
 async def test_positioning_and_erase_helpers(tmp_path: Path) -> None:

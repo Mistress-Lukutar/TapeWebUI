@@ -3,7 +3,7 @@ File:   session_io.py
 Brief:  Session header (t0) read/write helpers on top of the ITDT transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.1
 """
 
 from __future__ import annotations
@@ -27,9 +27,26 @@ from tapevaultui.services.tape_format import (
 
 logger = structlog.get_logger(__name__)
 
+# ITDT stdout fragments identifying a read attempt on a never-written
+# (blank) tape: the drive raises blank-check sense (key 0x08), which ITDT
+# surfaces as errno 1117 with zero records read.
+_BLANK_READ_MARKERS = ("blank check", "blank tape")
+# ITDT stdout fragments identifying a drive without a loaded medium.
+_NO_MEDIA_MARKERS = ("medium not present", "no media", "not ready")
+
 
 class SessionIoError(RuntimeError):
     """Raised when an ITDT session operation fails."""
+
+
+class NoMediaError(SessionIoError):
+    """Raised when the drive reports no loaded medium.
+
+    Observed as a rewind failure with errno 2 / sense key 0x02 (not
+    ready, ASC 0x04 0x02 "initializer command required") when the
+    cartridge is ejected but loadable. Callers use it to enter the
+    waiting_media state instead of failing the job.
+    """
 
 
 def new_session_id() -> str:
@@ -71,6 +88,41 @@ async def write_session_header(
     logger.info("session_header_written", session_id=header.session_id)
 
 
+def _looks_like_blank_read(stdout: str) -> bool:
+    """Check whether ITDT output indicates a read on a blank tape.
+
+    Args:
+        stdout: ITDT output text.
+
+    Returns:
+        True if the output suggests blank-check media (nothing readable
+        at BOP on a never-written cartridge).
+    """
+    lowered = stdout.lower()
+    if any(marker in lowered for marker in _BLANK_READ_MARKERS):
+        return True
+    return "errno 1117" in lowered and "0 records" in lowered
+
+
+def _looks_like_no_media(stdout: str) -> bool:
+    """Check whether ITDT output indicates no loaded medium.
+
+    Args:
+        stdout: ITDT output text.
+
+    Returns:
+        True if the output suggests the drive has no (loaded) cartridge.
+    """
+    lowered = stdout.lower()
+    if any(marker in lowered for marker in _NO_MEDIA_MARKERS):
+        return True
+    # errno 2 on a tape device is ITDT's mapping of SCSI not-ready with
+    # ASC/ASCQ 04/02 (initializer command required): cartridge loadable
+    # but not loaded. The message conjunction guards against other
+    # errno-2 sources.
+    return "errno 2 " in lowered and "cannot find the file specified" in lowered
+
+
 async def read_session_header(
     transport: ItDtTransport | FakeItDtTransport,
     work_dir: Path,
@@ -90,6 +142,7 @@ async def read_session_header(
 
     Raises:
         SessionIoError: If ITDT read/rewind commands fail.
+        NoMediaError: If the drive has no loaded medium.
         TapeFormatError: If the tape holds an incompatible future header.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +155,12 @@ async def read_session_header(
         await _rewind(transport)
         if temp_file.exists():
             temp_file.unlink()
-        if "filemark" in stdout.lower() or "end of data" in stdout.lower():
+        lowered = stdout.lower()
+        if (
+            "filemark" in lowered
+            or "end of data" in lowered
+            or _looks_like_blank_read(stdout)
+        ):
             return None  # blank / foreign tape: nothing readable at BOP
         raise SessionIoError(f"ITDT read of session header failed: {stdout}")
 
@@ -155,10 +213,14 @@ async def _rewind(transport: ItDtTransport | FakeItDtTransport) -> None:
 
     Raises:
         SessionIoError: If the rewind command fails.
+        NoMediaError: If the drive reports no loaded medium.
     """
     result = await transport.run(["rewind"])
     if result.exit_code != 0:
-        raise SessionIoError(f"ITDT rewind failed: {result.stdout.strip()}")
+        stdout = result.stdout.strip()
+        if _looks_like_no_media(stdout):
+            raise NoMediaError(f"ITDT rewind failed, no loaded medium: {stdout}")
+        raise SessionIoError(f"ITDT rewind failed: {stdout}")
 
 
 async def erase_tape_short(

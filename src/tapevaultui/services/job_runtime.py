@@ -3,7 +3,7 @@ File:   job_runtime.py
 Brief:  Job queue and state machine (exactly one active drive job).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.2
 """
 
 from __future__ import annotations
@@ -245,25 +245,24 @@ class JobRuntime:
         """Build the media-wait callback for an entry.
 
         v1 behavior (spec §15 decision): Windows toast notification is
-        enough; the runtime polls the drive for a NEW tape (t0 read
-        returns a different tape_id) every 15 seconds.
+        enough; the runtime polls the drive for usable media every 15
+        seconds — ready when a blank/foreign tape or one with a different
+        tape_id is loaded (an empty drive keeps waiting).
 
         Args:
-            entry: The entry that hit end-of-medium.
+            entry: The entry that hit end-of-medium or started with no
+                medium loaded.
 
         Returns:
-            Async callback returning True when new media is ready.
+            Async callback returning True when media is ready.
         """
 
         async def _wait() -> bool:
             old_tape_id = entry.stats.tape_id
             while not entry.cancel_event.is_set():
                 await asyncio.sleep(15.0)
-                header = await self._engine.read_tape_header_quiet()
-                if header is not None and header.tape_id != old_tape_id:
-                    logger.info(
-                        "new_tape_inserted", old=old_tape_id, new=header.tape_id
-                    )
+                if await self._engine.media_ready(old_tape_id):
+                    logger.info("media_ready", old=old_tape_id)
                     return True
             return False
 

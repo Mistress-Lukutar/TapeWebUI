@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.5.2
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from tapevaultui.services.catalog import CatalogRepository
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefinition
 from tapevaultui.services.session_io import (
+    NoMediaError,
     SessionIoError,
     erase_tape_short,
     new_session_id,
@@ -36,7 +37,6 @@ from tapevaultui.services.session_io import (
 from tapevaultui.services.snapshot import PlannedFile, sha256_of, snapshot_sources
 from tapevaultui.services.tape_format import (
     HeaderFileEntry,
-    SessionHeader,
     TapeFormatError,
     build_session_header,
     serialize_header,
@@ -259,7 +259,7 @@ class BackupEngine:
                 and no media callback is available.
             BackupEngineError: On hard ITDT failures.
         """
-        tape_id, tape_row = await self._prepare_tape()
+        tape_id, tape_row = await self._prepare_tape_or_wait(stats, wait_for_media)
         stats.tape_id = tape_id
 
         session = self._catalog.create_session(tape_row.id, job_name=definition.name)
@@ -427,20 +427,59 @@ class BackupEngine:
                 logger.warning("verify_hash_mismatch", path=file.path)
         await self._transport.run(["rewind"])
 
-    async def read_tape_header_quiet(self) -> SessionHeader | None:
-        """Read the inserted tape's header, swallowing device errors.
+    async def media_ready(self, old_tape_id: str) -> bool:
+        """Check the drive for usable media (waiting_media poll helper).
 
-        Used by the waiting_media poll: an empty drive or a read failure
-        simply means "no TapeWebUI tape inserted yet".
+        A drive error (no loaded medium) or an incompatible future-format
+        tape keeps the engine waiting; a blank/foreign tape or one whose
+        tape_id differs from ``old_tape_id`` is ready — ``_prepare_tape``
+        claims blank/foreign media as a new tape.
+
+        Args:
+            old_tape_id: Tape id that must be replaced (empty at job start).
 
         Returns:
-            Parsed SessionHeader or None.
+            True when ``_prepare_tape`` can proceed with inserted media.
         """
-
         try:
-            return await read_session_header(self._transport, self._work_dir)
-        except (SessionIoError, TapeFormatError):
-            return None
+            header = await read_session_header(self._transport, self._work_dir)
+        except TapeFormatError:
+            return False  # media present but holds an incompatible header
+        except SessionIoError:  # includes NoMediaError (no loaded medium)
+            return False
+        return header is None or header.tape_id != old_tape_id
+
+    async def _prepare_tape_or_wait(
+        self,
+        stats: BackupStats,
+        wait_for_media: MediaWaitCallback | None,
+    ) -> tuple[str, Tape]:
+        """Identify the tape, entering waiting_media when none is loaded.
+
+        A blank/foreign tape is registered as a fresh TapeWebUI tape; a
+        drive without a loaded medium waits (or fails cleanly when no
+        media callback is available).
+
+        Args:
+            stats: Progress accumulator (waiting_media state is published).
+            wait_for_media: Callback awaiting tape insertion, or None.
+
+        Returns:
+            Tuple of (tape_id, catalog Tape row).
+
+        Raises:
+            BackupEngineError: When no medium is loaded and no callback
+                is available to wait for one.
+        """
+        try:
+            return await self._prepare_tape()
+        except NoMediaError:
+            if wait_for_media is None:
+                raise BackupEngineError(
+                    "no tape inserted in the drive; insert a tape and retry"
+                ) from None
+            await self._await_new_tape(stats, wait_for_media)
+            return await self._prepare_tape()
 
     async def _prepare_tape(self) -> tuple[str, Tape]:
         """Identify the inserted tape and ensure it exists in the catalog.
