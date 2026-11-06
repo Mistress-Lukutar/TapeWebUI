@@ -3,7 +3,7 @@ File:   dependencies.py
 Brief:  FastAPI dependency accessors for services stored on app.state.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from tapevaultui.config import Settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
 from tapevaultui.services.app_settings import AppSettingsService
 from tapevaultui.services.catalog import CatalogRepository
+from tapevaultui.services.drive_ops import DriveOpsState
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.job_defs import JobDefStore
 from tapevaultui.services.job_runtime import JobRuntime
@@ -62,6 +63,19 @@ def get_drive_service(request: Request) -> DriveService:
     """
     drive: DriveService = request.app.state.drive
     return drive
+
+
+def get_drive_ops_state(request: Request) -> DriveOpsState:
+    """Return the paired-operations toggle state.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The DriveOpsState instance created in the app lifespan.
+    """
+    state: DriveOpsState = request.app.state.drive_ops
+    return state
 
 
 def get_job_def_store(request: Request) -> JobDefStore:
@@ -146,6 +160,7 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 AppSettingsDep = Annotated[AppSettingsService, Depends(get_app_settings)]
 TransportDep = Annotated[ItDtTransport | FakeItDtTransport, Depends(get_transport)]
 DriveServiceDep = Annotated[DriveService, Depends(get_drive_service)]
+DriveOpsStateDep = Annotated[DriveOpsState, Depends(get_drive_ops_state)]
 JobDefStoreDep = Annotated[JobDefStore, Depends(get_job_def_store)]
 JobRuntimeDep = Annotated[JobRuntime, Depends(get_job_runtime)]
 CatalogDep = Annotated[CatalogRepository, Depends(get_catalog)]

@@ -3,7 +3,7 @@ File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from tapevaultui.routers import tapes as tapes_router
 from tapevaultui.services.app_settings import AppSettingsService
 from tapevaultui.services.backup_engine import BackupEngine
 from tapevaultui.services.catalog import CatalogRepository, sqlite_url_for_path
+from tapevaultui.services.drive_ops import DriveOpsState
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefStore
@@ -160,6 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_bus = event_bus
     app.state.transport = transport
     app.state.drive = drive
+    app.state.drive_ops = DriveOpsState()
     app.state.app_settings = app_settings
     app_settings.bind_runtime(drive=drive, transport=transport)
     app.state.catalog = catalog

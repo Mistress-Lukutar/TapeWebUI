@@ -14,7 +14,12 @@ from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtResult,
 )
-from tapevaultui.services.drive_ops import ALL_OPS, DriveOpError, run_drive_op
+from tapevaultui.services.drive_ops import (
+    ALL_OPS,
+    DriveOpError,
+    DriveOpsState,
+    run_drive_op,
+)
 from tests.conftest import load_fixture
 
 
@@ -137,6 +142,36 @@ async def test_unload_still_locked_raises_friendly_error() -> None:
     with pytest.raises(DriveOpError, match="locked"):
         await run_drive_op(fake, "unload")
     assert fake.commands == [("unload",), ("allow",), ("unload",)]
+
+
+@pytest.mark.unit
+async def test_paired_ops_track_toggle_state() -> None:
+    """Successful paired ops flip the tracked toggle state."""
+    fake = FakeItDtTransport()
+    state = DriveOpsState()
+
+    await run_drive_op(fake, "lock", state)
+    assert state.door_locked is True
+    await run_drive_op(fake, "unlock", state)
+    assert state.door_locked is False
+
+    await run_drive_op(fake, "reserve", state)
+    assert state.unit_reserved is True
+    await run_drive_op(fake, "release", state)
+    assert state.unit_reserved is False
+
+    # A successful unload leaves no media (and no lock) behind.
+    await run_drive_op(fake, "lock", state)
+    assert state.door_locked is True
+    await run_drive_op(fake, "unload", state)
+    assert state.door_locked is False
+
+    # Failed ops do not flip the state.
+    fake.scenarios["release"] = ("boom", 2)
+    state.unit_reserved = True
+    with pytest.raises(DriveOpError):
+        await run_drive_op(fake, "release", state)
+    assert state.unit_reserved is True
 
 
 @pytest.mark.unit

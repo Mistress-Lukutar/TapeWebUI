@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Final
 
 import structlog
+from pydantic import BaseModel
 
 from tapevaultui.infrastructure.itdt_parse import is_medium_removal_prevented
 from tapevaultui.infrastructure.itdt_transport import (
@@ -45,6 +46,23 @@ COMPOSITE_OPS: Final[frozenset[str]] = frozenset(
 ALL_OPS: Final[frozenset[str]] = frozenset(SIMPLE_OPS) | COMPOSITE_OPS
 
 
+class DriveOpsState(BaseModel):
+    """Last-known toggle state of the paired manual operations.
+
+    SCSI offers no query for the PREVENT MEDIUM REMOVAL / RESERVE flags,
+    so the state is tracked from the operations this app issues itself;
+    it resets to "unlocked / released" on process start.
+    """
+
+    door_locked: bool = False
+    unit_reserved: bool = False
+
+
+# Fallback when the caller does not provide a state instance (the router
+# always passes the app-scoped one).
+_DEFAULT_STATE = DriveOpsState()
+
+
 class DriveOpError(RuntimeError):
     """Raised when a manual drive operation fails."""
 
@@ -52,12 +70,15 @@ class DriveOpError(RuntimeError):
 async def run_drive_op(
     transport: ItDtTransport | FakeItDtTransport,
     op: str,
+    state: DriveOpsState | None = None,
 ) -> str:
     """Execute one manual drive operation and return the ITDT output.
 
     Args:
         transport: ITDT transport (real or fake).
         op: Operation name (see ``ALL_OPS``).
+        state: Toggle-state tracker for the paired ops; defaults to a
+            module-level instance when not provided.
 
     Returns:
         Raw ITDT stdout (or a human summary for composite ops).
@@ -66,6 +87,8 @@ async def run_drive_op(
         DriveOpError: If the operation is unknown or ITDT reports a
             failure.
     """
+    if state is None:
+        state = _DEFAULT_STATE
     if op == "rewind":
         await rewind_tape(transport)
         return "Rewound to beginning of partition (BOP)."
@@ -107,5 +130,14 @@ async def run_drive_op(
                 "prevented). Run the 'unlock' operation, then unload again."
             )
         raise DriveOpError(f"ITDT {args[0]} failed: {result.stdout.strip()}")
+    if op == "lock":
+        state.door_locked = True
+    elif op in ("unlock", "unload"):
+        # The cartridge left the drive (or is about to): nothing to lock.
+        state.door_locked = False
+    elif op == "reserve":
+        state.unit_reserved = True
+    elif op == "release":
+        state.unit_reserved = False
     logger.info("drive_op_done", op=op)
     return result.stdout.strip() or f"ITDT {args[0]} completed."

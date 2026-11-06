@@ -12,10 +12,20 @@ interface StatisticsResponse {
   updated_at: string
 }
 
+interface OpsState {
+  door_locked: boolean
+  unit_reserved: boolean
+}
+
 interface DriveOpResponse {
   op: string
   output: string
-  status: { reachable: boolean }
+  status: { reachable: boolean; no_medium: boolean }
+  state: OpsState
+}
+
+interface OpsStateResponse extends OpsState {
+  cartridge_loaded: boolean | null
 }
 
 interface OpDef {
@@ -24,17 +34,12 @@ interface OpDef {
   title: string
   danger?: boolean
   confirm?: string
+  disabled?: boolean
 }
 
-// Manual operations mirroring the ITDT-SE command set for a single drive.
+// Manual single-shot operations (paired ones are rendered as toggles).
 const OPS: OpDef[] = [
   { op: 'tur', label: 'Test unit ready', title: 'Issue SCSI Test Unit Ready' },
-  { op: 'load', label: 'Load cartridge', title: 'Load the cartridge into the drive' },
-  { op: 'unload', label: 'Unload / eject', title: 'Unload and eject the cartridge' },
-  { op: 'lock', label: 'Lock door', title: 'Prevent medium removal (SCSI prevent)' },
-  { op: 'unlock', label: 'Unlock door', title: 'Allow medium removal (SCSI allow)' },
-  { op: 'reserve', label: 'Reserve unit', title: 'SCSI reserve unit' },
-  { op: 'release', label: 'Release unit', title: 'SCSI release unit' },
   { op: 'rewind', label: 'Rewind', title: 'Rewind to beginning of partition' },
   { op: 'seod', label: 'Space to EOD', title: 'Space to end of data (append point)' },
   {
@@ -86,6 +91,44 @@ const loading = ref(false)
 const running = ref('')
 const consoleOutput = ref<string[]>([])
 const error = ref('')
+const opsState = ref<OpsStateResponse>({
+  door_locked: false,
+  unit_reserved: false,
+  cartridge_loaded: null,
+})
+
+// Paired toggles: label/op flip with the tracked state; the button gets
+// a "pressed" look while the active side (locked / reserved) is on.
+const cartridgeToggle = computed<OpDef>(() => ({
+  op: opsState.value.cartridge_loaded ? 'unload' : 'load',
+  label: opsState.value.cartridge_loaded ? 'Unload / eject' : 'Load cartridge',
+  title: opsState.value.cartridge_loaded
+    ? 'Unload and eject the cartridge'
+    : 'Load the cartridge into the drive',
+  disabled: opsState.value.cartridge_loaded === null,
+}))
+const doorToggle = computed<OpDef>(() => ({
+  op: opsState.value.door_locked ? 'unlock' : 'lock',
+  label: opsState.value.door_locked ? 'Unlock door' : 'Lock door',
+  title: opsState.value.door_locked
+    ? 'Allow medium removal (SCSI allow)'
+    : 'Prevent medium removal (SCSI prevent)',
+}))
+const reserveToggle = computed<OpDef>(() => ({
+  op: opsState.value.unit_reserved ? 'release' : 'reserve',
+  label: opsState.value.unit_reserved ? 'Release unit' : 'Reserve unit',
+  title: opsState.value.unit_reserved
+    ? 'SCSI release unit'
+    : 'SCSI reserve unit',
+}))
+
+function applyOpState(response: DriveOpResponse): void {
+  opsState.value.door_locked = response.state.door_locked
+  opsState.value.unit_reserved = response.state.unit_reserved
+  opsState.value.cartridge_loaded = response.status.reachable
+    ? !response.status.no_medium
+    : null
+}
 
 const orderedStats = computed<[string, string][]>(() => {
   if (!stats.value) return []
@@ -112,6 +155,14 @@ async function load(): Promise<void> {
   }
 }
 
+async function loadOpsState(): Promise<void> {
+  try {
+    opsState.value = await apiGet<OpsStateResponse>('/api/service/ops/state')
+  } catch {
+    // Keep the defaults; the buttons still work (the backend tracks state).
+  }
+}
+
 async function runOp(def: OpDef): Promise<void> {
   if (def.confirm && !window.confirm(def.confirm)) return
   running.value = def.op
@@ -120,6 +171,7 @@ async function runOp(def: OpDef): Promise<void> {
     const body = await apiSend<DriveOpResponse>(`/api/service/ops/${def.op}`, 'POST')
     consoleOutput.value.unshift(`[${def.op}] ${body.output}`)
     if (consoleOutput.value.length > 20) consoleOutput.value.pop()
+    applyOpState(body)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     consoleOutput.value.unshift(`[${def.op}] FAILED: ${message}`)
@@ -130,7 +182,10 @@ async function runOp(def: OpDef): Promise<void> {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadOpsState()
+})
 </script>
 
 <template>
@@ -165,6 +220,32 @@ onMounted(load)
         destroy all data on the loaded tape.
       </p>
       <div class="op-grid">
+        <button
+          class="op-btn"
+          :class="{ toggled: opsState.door_locked }"
+          :title="doorToggle.title"
+          :disabled="running !== ''"
+          @click="runOp(doorToggle)"
+        >
+          {{ running === doorToggle.op ? '…' : doorToggle.label }}
+        </button>
+        <button
+          class="op-btn"
+          :class="{ toggled: opsState.unit_reserved }"
+          :title="reserveToggle.title"
+          :disabled="running !== ''"
+          @click="runOp(reserveToggle)"
+        >
+          {{ running === reserveToggle.op ? '…' : reserveToggle.label }}
+        </button>
+        <button
+          class="op-btn"
+          :title="cartridgeToggle.title"
+          :disabled="running !== '' || cartridgeToggle.disabled"
+          @click="runOp(cartridgeToggle)"
+        >
+          {{ running === cartridgeToggle.op ? '…' : cartridgeToggle.label }}
+        </button>
         <button
           v-for="def in OPS"
           :key="def.op"
@@ -212,6 +293,12 @@ onMounted(load)
 .op-btn.danger {
   border-color: var(--danger, #b3413c);
   color: var(--danger, #e07a75);
+}
+
+.op-btn.toggled {
+  background: rgba(53, 201, 142, 0.15);
+  border-color: var(--accent, #35c98e);
+  color: var(--accent, #35c98e);
 }
 
 .stats-grid {

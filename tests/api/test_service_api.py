@@ -3,12 +3,14 @@ File:   test_service_api.py
 Brief:  API tests for the Service page endpoints (statistics + manual ops).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+
+from tests.conftest import load_fixture
 
 
 def test_service_statistics(client: TestClient) -> None:
@@ -53,3 +55,46 @@ def test_service_op_failure(client: TestClient) -> None:
     response = client.post("/api/service/ops/load")
     assert response.status_code == 409
     assert "load failed" in response.json()["detail"]
+
+
+def test_ops_state_initial(client: TestClient) -> None:
+    """The state endpoint reports unlocked/not-reserved/loaded defaults."""
+    response = client.get("/api/service/ops/state")
+    assert response.status_code == 200
+    assert response.json() == {
+        "door_locked": False,
+        "unit_reserved": False,
+        "cartridge_loaded": True,
+    }
+
+
+def test_ops_state_follows_paired_ops(client: TestClient) -> None:
+    """Paired ops flip the state the toggle buttons render."""
+    client.post("/api/service/ops/lock")
+    client.post("/api/service/ops/reserve")
+    body = client.get("/api/service/ops/state").json()
+    assert body["door_locked"] is True
+    assert body["unit_reserved"] is True
+    assert body["cartridge_loaded"] is True
+
+    client.post("/api/service/ops/unlock")
+    client.post("/api/service/ops/release")
+    body = client.get("/api/service/ops/state").json()
+    assert body["door_locked"] is False
+    assert body["unit_reserved"] is False
+
+
+def test_ops_state_cartridge_unloaded(client: TestClient) -> None:
+    """After unload the fake reports no medium; cartridge_loaded flips."""
+    client.post("/api/service/ops/unload")
+    body = client.get("/api/service/ops/state").json()
+    assert body["cartridge_loaded"] is True  # fake qrypos still healthy
+
+    transport = client.app.state.transport  # type: ignore[attr-defined]
+    transport.scenarios["qrypos"] = (
+        load_fixture("fixture_qrypos_no_medium.txt"),
+        2,
+    )
+    client.post("/api/service/ops/tur")
+    body = client.get("/api/service/ops/state").json()
+    assert body["cartridge_loaded"] is False

@@ -3,7 +3,7 @@ File:   service.py
 Brief:  Manual drive operations and device statistics API (Service page).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.6.0
+Version: v0.6.3
 """
 
 from __future__ import annotations
@@ -13,12 +13,22 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from tapevaultui.dependencies import DriveServiceDep, JobRuntimeDep, TransportDep
+from tapevaultui.dependencies import (
+    DriveOpsStateDep,
+    DriveServiceDep,
+    JobRuntimeDep,
+    TransportDep,
+)
 from tapevaultui.infrastructure.itdt_parse import (
     ItDtParseError,
     parse_device_statistics,
 )
-from tapevaultui.services.drive_ops import ALL_OPS, DriveOpError, run_drive_op
+from tapevaultui.services.drive_ops import (
+    ALL_OPS,
+    DriveOpError,
+    DriveOpsState,
+    run_drive_op,
+)
 from tapevaultui.services.drive_service import DriveStatus
 
 router = APIRouter(prefix="/api/service", tags=["service"])
@@ -36,12 +46,25 @@ class DeviceStatisticsResponse(BaseModel):
     updated_at: datetime
 
 
+class DriveOpsStateResponse(BaseModel):
+    """Toggle states for the paired Service-page buttons.
+
+    ``cartridge_loaded`` is derived from the drive status poll: True /
+    False, or None when the drive is unreachable (state unknown).
+    """
+
+    door_locked: bool
+    unit_reserved: bool
+    cartridge_loaded: bool | None
+
+
 class DriveOpResponse(BaseModel):
     """Result of one manual drive operation."""
 
     op: str
     output: str
     status: DriveStatus
+    state: DriveOpsState
 
 
 @router.get("/statistics", response_model=DeviceStatisticsResponse)
@@ -83,9 +106,38 @@ async def get_statistics(
     )
 
 
+@router.get("/ops/state", response_model=DriveOpsStateResponse)
+async def get_ops_state(
+    ops_state: DriveOpsStateDep, drive: DriveServiceDep
+) -> DriveOpsStateResponse:
+    """Return the toggle states for the paired operation buttons.
+
+    Args:
+        ops_state: Tracked lock/reserve state of manual operations.
+        drive: Drive service, to derive the cartridge-loaded state.
+
+    Returns:
+        DriveOpsStateResponse with lock, reserve and cartridge states.
+    """
+    identity = drive.last_status
+    if identity is None or not identity.reachable:
+        cartridge_loaded: bool | None = None
+    else:
+        cartridge_loaded = not identity.no_medium
+    return DriveOpsStateResponse(
+        door_locked=ops_state.door_locked,
+        unit_reserved=ops_state.unit_reserved,
+        cartridge_loaded=cartridge_loaded,
+    )
+
+
 @router.post("/ops/{op}", response_model=DriveOpResponse)
 async def run_op(
-    op: str, transport: TransportDep, runtime: JobRuntimeDep, drive: DriveServiceDep
+    op: str,
+    transport: TransportDep,
+    runtime: JobRuntimeDep,
+    drive: DriveServiceDep,
+    ops_state: DriveOpsStateDep,
 ) -> DriveOpResponse:
     """Run one manual drive/media operation.
 
@@ -98,6 +150,7 @@ async def run_op(
         transport: ITDT transport dependency.
         runtime: Job runtime, to refuse operations while a job is active.
         drive: Drive service dependency for the post-op refresh.
+        ops_state: Tracked toggle state of the paired operations.
 
     Returns:
         DriveOpResponse with raw ITDT output and the refreshed status.
@@ -114,8 +167,8 @@ async def run_op(
             detail="A job is running; cancel it before manual drive operations",
         )
     try:
-        output = await run_drive_op(transport, op)
+        output = await run_drive_op(transport, op, ops_state)
     except DriveOpError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     status = await drive.refresh_and_publish()
-    return DriveOpResponse(op=op, output=output, status=status)
+    return DriveOpResponse(op=op, output=output, status=status, state=ops_state)
