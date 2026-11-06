@@ -1,0 +1,17 @@
+Querying Device Statistics...
+Initializing device...
+Retrieving Log Pages...
+ Device Statistics:
+ Lifetime Media Loads             103  Lifetime Cleaning Op.              0
+ Lifetime POH                    1850  Lifetime MMH                      16
+ Lt Meters Tape Processed      298950  Lt MMH Incompatib. Media           0
+ Lt POH Temperature Cond.           0  Lt POH Power Cons. Cond.           0
+ MMH Since Last Clean              16  MMH Since 2-last Clean            16
+ MMH Since 3-last Clean            16  Lt POH Forced Reset/Eject          0
+ Lifetime Power Cycles             12  Vol Loads Since Par Reset          3
+ Hard Write Errors                  0  Hard Read Errors                   0
+ Duty Cycle Sample Time      14672267  Read Duty Cycle                    0
+ Write Duty Cycle                   0  Activity Duty Cycle                0
+ Vol Not Present Duty Cycle         0  Ready Duty Cycle                  99
+ Drive MFG SN              1013000284    Drive SN                  1013000284
+Exit with code: 0

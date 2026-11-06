@@ -3,7 +3,7 @@ File:   session_io.py
 Brief:  Session header (t0) read/write helpers on top of the ITDT transport.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.3
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -172,11 +172,11 @@ async def read_session_header(
     work_dir.mkdir(parents=True, exist_ok=True)
     temp_file = work_dir / f"t0_{uuid.uuid4().hex[:8]}.bin"
 
-    await _rewind(transport)
+    await rewind_tape(transport)
     result = await transport.run(["read", "-d", str(temp_file)])
     if result.exit_code != 0:
         stdout = result.stdout.strip()
-        await _rewind(transport)
+        await rewind_tape(transport)
         if temp_file.exists():
             temp_file.unlink()
         lowered = stdout.lower()
@@ -194,7 +194,7 @@ async def read_session_header(
         if temp_file.exists():
             temp_file.unlink()
 
-    await _rewind(transport)
+    await rewind_tape(transport)
     header = parse_header(raw)
     if header is None:
         logger.info("foreign_tape_detected")
@@ -229,7 +229,7 @@ async def identify_tape(
         raise SessionIoError(str(exc)) from exc
 
 
-async def _rewind(transport: ItDtTransport | FakeItDtTransport) -> None:
+async def rewind_tape(transport: ItDtTransport | FakeItDtTransport) -> None:
     """Rewind the tape to BOP.
 
     Args:
@@ -258,7 +258,7 @@ async def erase_tape_short(
     Raises:
         SessionIoError: If the rewind or erase command fails.
     """
-    await _rewind(transport)
+    await rewind_tape(transport)
     result = await transport.run(["erase", "-short"])
     if result.exit_code != 0:
         raise SessionIoError(f"ITDT short erase failed: {result.stdout.strip()}")

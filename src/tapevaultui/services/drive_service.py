@@ -3,7 +3,7 @@ File:   drive_service.py
 Brief:  Drive/media status via ITDT with polling and SSE publication.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.2
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -176,6 +176,17 @@ class DriveService:
                 error=status.error,
             )
         return status
+
+    def update_poll_interval(self, interval_s: float) -> None:
+        """Live-update the polling interval (Settings page).
+
+        The loop reads the attribute each iteration, so the change takes
+        effect after the current sleep finishes.
+
+        Args:
+            interval_s: New interval in seconds (>= 1).
+        """
+        self._poll_interval_s = max(1.0, interval_s)
 
     async def start(self) -> None:
         """Start the background polling loop."""

@@ -14,6 +14,7 @@ from fastapi import Depends, Request
 
 from tapevaultui.config import Settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
+from tapevaultui.services.app_settings import AppSettingsService
 from tapevaultui.services.catalog import CatalogRepository
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.job_defs import JobDefStore
@@ -128,7 +129,21 @@ def get_scheduler(request: Request) -> SchedulerService:
     return scheduler
 
 
+def get_app_settings(request: Request) -> AppSettingsService:
+    """Return the editable-settings service.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        The AppSettingsService instance created in the app lifespan.
+    """
+    app_settings: AppSettingsService = request.app.state.app_settings
+    return app_settings
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+AppSettingsDep = Annotated[AppSettingsService, Depends(get_app_settings)]
 TransportDep = Annotated[ItDtTransport | FakeItDtTransport, Depends(get_transport)]
 DriveServiceDep = Annotated[DriveService, Depends(get_drive_service)]
 JobDefStoreDep = Annotated[JobDefStore, Depends(get_job_def_store)]

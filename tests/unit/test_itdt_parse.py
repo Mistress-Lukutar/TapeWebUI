@@ -3,7 +3,7 @@ File:   test_itdt_parse.py
 Brief:  Parser unit tests on real captured ITDT output fixtures.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import pytest
 from tapevaultui.infrastructure.itdt_parse import (
     ItDtParseError,
     is_open_failure,
+    parse_device_statistics,
     parse_devinfo,
     parse_getparms,
     parse_inquiry_json,
@@ -112,3 +113,27 @@ def test_is_open_failure() -> None:
 def test_runtimeinfo_unsupported_fixture_is_not_open_failure() -> None:
     """The unsupported runtimeinfo fixture is not an open failure."""
     assert not is_open_failure(load_fixture("fixture_runtimeinfo.txt"))
+
+
+def test_parse_device_statistics_fixture() -> None:
+    """devicestatistics two-column table parses into a normalized map."""
+    stats = parse_device_statistics(load_fixture("fixture_devstat.txt"))
+    assert stats["lifetime_media_loads"] == "103"
+    assert stats["lifetime_cleaning_op"] == "0"
+    assert stats["lifetime_poh"] == "1850"
+    assert stats["lt_meters_tape_processed"] == "298950"
+    assert stats["mmh_since_last_clean"] == "16"
+    assert stats["lifetime_power_cycles"] == "12"
+    assert stats["hard_write_errors"] == "0"
+    assert stats["hard_read_errors"] == "0"
+    assert stats["ready_duty_cycle"] == "99"
+    assert stats["drive_sn"] == "1013000284"
+    assert stats["drive_mfg_sn"] == "1013000284"
+    # Footer lines must not leak into the map.
+    assert not any("exit" in key for key in stats)
+
+
+def test_parse_device_statistics_missing_table() -> None:
+    """Output without a statistics table raises ItDtParseError."""
+    with pytest.raises(ItDtParseError, match="Device Statistics"):
+        parse_device_statistics("Operation not supported, errno 1\n")

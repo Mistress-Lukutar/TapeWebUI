@@ -3,7 +3,7 @@ File:   test_jobs_api.py
 Brief:  Jobs API endpoint tests (CRUD, run, cancel, runtime status).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ File:   job_runtime.py
 Brief:  Job queue and state machine (exactly one active drive job).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.2
+Version: v0.6.0
 """
 
 from __future__ import annotations

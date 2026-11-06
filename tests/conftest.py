@@ -3,7 +3,7 @@ File:   conftest.py
 Brief:  Shared pytest fixtures: isolated env, fake transport, API client.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ def fake_transport() -> FakeItDtTransport:
             "getparms": (load_fixture("fixture_getparms.txt"), 0),
             "devinfo": (load_fixture("fixture_devinfo.txt"), 0),
             "inqj": (load_fixture("fixture_inqj.txt"), 0),
+            "devicestatistics": (load_fixture("fixture_devstat.txt"), 0),
         }
     )
 

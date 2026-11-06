@@ -3,7 +3,7 @@ File:   job_defs.py
 Brief:  YAML job definitions: pydantic schema, loader and store (data/jobs).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations

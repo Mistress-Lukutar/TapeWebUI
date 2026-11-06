@@ -3,7 +3,7 @@ File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -90,6 +90,24 @@ class ItDtTransport:
         command.extend(["-f", self._device_name])
         command.extend(args)
         return command
+
+    def update_timeouts(
+        self,
+        *,
+        default_timeout_s: int,
+        open_retry_s: float,
+        open_retries: int,
+    ) -> None:
+        """Live-update timeout/retry parameters (Settings page).
+
+        Args:
+            default_timeout_s: New default per-command timeout.
+            open_retry_s: New delay before retrying an open failure.
+            open_retries: New number of open-failure retries.
+        """
+        self._default_timeout_s = default_timeout_s
+        self._open_retry_s = open_retry_s
+        self._open_retries = open_retries
 
     async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
         """Run one ITDT command to completion.
@@ -278,6 +296,26 @@ class FakeItDtTransport:
             Complete argv list (synthetic executable path).
         """
         return ["itdt", "-force-generic-dd", "-f", self.device_name, *args]
+
+    def update_timeouts(
+        self,
+        *,
+        default_timeout_s: int,
+        open_retry_s: float,
+        open_retries: int,
+    ) -> None:
+        """Record the update for assertions (interface compatibility).
+
+        Args:
+            default_timeout_s: Recorded in ``last_timeouts``.
+            open_retry_s: Recorded in ``last_timeouts``.
+            open_retries: Recorded in ``last_timeouts``.
+        """
+        self.last_timeouts = {
+            "default_timeout_s": default_timeout_s,
+            "open_retry_s": open_retry_s,
+            "open_retries": open_retries,
+        }
 
     async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
         """Record the call and return the scenario response.

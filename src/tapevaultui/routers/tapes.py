@@ -3,7 +3,7 @@ File:   tapes.py
 Brief:  Tapes, catalog search and history API endpoints.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations

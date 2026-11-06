@@ -1,9 +1,9 @@
 """
 File:   itdt_parse.py
-Brief:  Pure parsers for ITDT-SE CLI output (vpd, qrypos, getparms, devinfo, inqj).
+Brief:  Pure parsers for ITDT-SE CLI output (vpd, qrypos, getparms, inqj, devstat).
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -259,6 +259,45 @@ def parse_inquiry_json(text: str) -> InquiryInfo:
         )
     except (KeyError, TypeError) as exc:
         raise ItDtParseError(f"Missing inquiry identity fields: {exc}") from exc
+
+
+def parse_device_statistics(text: str) -> dict[str, str]:
+    """Parse `devicestatistics` output into a normalized label -> value map.
+
+    The command prints a two-column table ("Label  <spaces> value
+    Label  <spaces> value") after the "Device Statistics:" header. Keys
+    are normalized to lowercase snake_case; values are kept as strings.
+
+    Args:
+        text: Full stdout of the ITDT ``devicestatistics`` command.
+
+    Returns:
+        Dict of statistic name -> raw string value.
+
+    Raises:
+        ItDtParseError: If no Device Statistics table is found.
+    """
+    stats: dict[str, str] = {}
+    in_section = False
+    for line in text.splitlines():
+        if not in_section:
+            if "Device Statistics:" in line:
+                in_section = True
+            continue
+        segments = [
+            seg.strip() for seg in re.split(r"\s{2,}", line.strip()) if seg.strip()
+        ]
+        if not segments:
+            continue
+        if len(segments) % 2 != 0:
+            break  # footer line (e.g. "Exit with code: 0")
+        for i in range(0, len(segments), 2):
+            key = re.sub(r"[^a-z0-9]+", "_", segments[i].lower()).strip("_")
+            if key:
+                stats[key] = segments[i + 1]
+    if not stats:
+        raise ItDtParseError("Device Statistics table not found in output")
+    return stats
 
 
 def is_open_failure(text: str) -> bool:

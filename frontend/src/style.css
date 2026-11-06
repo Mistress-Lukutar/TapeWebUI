@@ -574,3 +574,21 @@ button.danger:hover:not(:disabled) {
   gap: 8px;
   padding: 1px 0;
 }
+
+/* Settings page form fields */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.field span {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.ok-text {
+  color: var(--accent);
+  margin-top: 8px;
+}

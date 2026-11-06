@@ -3,7 +3,7 @@ File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
 Date:   2026-11-06
-Version: v0.5.0
+Version: v0.6.0
 """
 
 from __future__ import annotations
@@ -29,7 +29,10 @@ from tapevaultui.routers import device as device_router
 from tapevaultui.routers import jobs as jobs_router
 from tapevaultui.routers import restore as restore_router
 from tapevaultui.routers import schedules as schedules_router
+from tapevaultui.routers import service as service_router
+from tapevaultui.routers import settings as settings_router
 from tapevaultui.routers import tapes as tapes_router
+from tapevaultui.services.app_settings import AppSettingsService
 from tapevaultui.services.backup_engine import BackupEngine
 from tapevaultui.services.catalog import CatalogRepository, sqlite_url_for_path
 from tapevaultui.services.drive_service import DriveService
@@ -96,6 +99,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     settings.ensure_dirs()
 
+    # Editable settings overrides (data/settings.json) applied before any
+    # service is constructed, so transport/drive start with user values.
+    app_settings = AppSettingsService(settings, settings.data_dir / "settings.json")
+    app_settings.load_overrides()
+
     event_bus = EventBus()
     for topic in SSE_TOPICS:
         event_bus.subscribe(topic, _make_sse_bridge(topic))
@@ -152,6 +160,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_bus = event_bus
     app.state.transport = transport
     app.state.drive = drive
+    app.state.app_settings = app_settings
+    app_settings.bind_runtime(drive=drive, transport=transport)
     app.state.catalog = catalog
     app.state.job_defs = job_defs
     app.state.job_runtime = job_runtime
@@ -193,6 +203,8 @@ def create_app() -> FastAPI:
     app.include_router(catalog_router.router)
     app.include_router(restore_router.router)
     app.include_router(schedules_router.router)
+    app.include_router(service_router.router)
+    app.include_router(settings_router.router)
 
     @app.get("/events")
     async def events() -> StreamingResponse:

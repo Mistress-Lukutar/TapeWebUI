@@ -7,8 +7,10 @@ import Jobs from './pages/Jobs.vue'
 import Tapes from './pages/Tapes.vue'
 import Restore from './pages/Restore.vue'
 import History from './pages/History.vue'
+import Settings from './pages/Settings.vue'
+import Service from './pages/Service.vue'
 
-type Page = 'dashboard' | 'jobs' | 'tapes' | 'restore' | 'history'
+type Page = 'dashboard' | 'jobs' | 'tapes' | 'restore' | 'history' | 'settings' | 'service'
 
 const drive = useDriveStore()
 const runtime = useRuntimeStore()
@@ -49,6 +51,16 @@ const pages: { key: Page; label: string; icon: string }[] = [
     key: 'history',
     label: 'History',
     icon: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  },
+  {
+    key: 'settings',
+    label: 'Settings',
+    icon: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  },
+  {
+    key: 'service',
+    label: 'Service',
+    icon: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   },
 ]
 
@@ -187,6 +199,8 @@ onMounted(() => {
       <main v-else-if="page === 'tapes'"><Tapes /></main>
       <main v-else-if="page === 'restore'"><Restore /></main>
       <main v-else-if="page === 'history'"><History /></main>
+      <main v-else-if="page === 'settings'"><Settings /></main>
+      <main v-else-if="page === 'service'"><Service /></main>
     </div>
   </div>
 </template>
