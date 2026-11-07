@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { apiGet, apiSend, formatBytes, formatIso } from '../api'
 
 interface Tape {
@@ -10,6 +10,7 @@ interface Tape {
   bytes_used: number
   created_at: string
   notes: string
+  last_verified_at: string | null
 }
 
 interface Session {
@@ -42,12 +43,50 @@ interface SearchHit {
   tape_label: string
 }
 
+interface SessionDiff {
+  kind: string
+  file_base: number
+  session_id: string
+  job_name: string
+  catalog_session_id: number | null
+  catalog_status: string
+  detail: string
+}
+
+interface DeepReport {
+  tape_id: number | null
+  tape_uuid: string | null
+  tape_label: string
+  on_tape_count: number
+  catalog_count: number
+  diffs: SessionDiff[]
+}
+
+interface VerifyResponse {
+  status: string
+  tape_id: number | null
+  tape_uuid: string | null
+  tape_label: string
+  detail: string
+  report: DeepReport | null
+}
+
+interface StaleNotice {
+  active: boolean
+  reason: string
+  at: string
+}
+
 const tapes = ref<Tape[]>([])
 const details = ref<TapeDetails | null>(null)
 const files = ref<FileRow[]>([])
 const query = ref('')
 const hits = ref<SearchHit[] | null>(null)
 const error = ref('')
+const staleNotice = ref<StaleNotice | null>(null)
+const verifying = ref(false)
+const verifyResult = ref<VerifyResponse | null>(null)
+const applying = ref(false)
 
 async function load(): Promise<void> {
   try {
@@ -56,6 +95,69 @@ async function load(): Promise<void> {
     error.value = String(err)
   }
 }
+
+async function loadStale(): Promise<void> {
+  try {
+    staleNotice.value = await apiGet<StaleNotice | null>('/api/sync/stale-notice')
+  } catch {
+    staleNotice.value = null
+  }
+}
+
+async function dismissStale(): Promise<void> {
+  try {
+    await apiSend('/api/sync/stale-notice/dismiss', 'POST')
+    staleNotice.value = null
+  } catch (err) {
+    error.value = String(err)
+  }
+}
+
+async function verify(deep: boolean): Promise<void> {
+  error.value = ''
+  verifying.value = true
+  verifyResult.value = null
+  try {
+    verifyResult.value = await apiSend<VerifyResponse>(
+      `/api/drive/verify-tape?deep=${deep}`,
+      'POST',
+    )
+    await load()
+  } catch (err) {
+    error.value = String(err)
+  } finally {
+    verifying.value = false
+  }
+}
+
+async function markSessionsErased(sessionIds: number[]): Promise<void> {
+  if (!verifyResult.value?.report || !sessionIds.length) return
+  const tapeId = verifyResult.value.report.tape_id
+  if (tapeId === null) return
+  if (!window.confirm(`Mark ${sessionIds.length} session(s) erased in the catalog?`))
+    return
+  error.value = ''
+  applying.value = true
+  try {
+    await apiSend(`/api/tapes/${tapeId}/sessions/erase-mark`, 'POST', {
+      session_ids: sessionIds,
+    })
+    // Re-run the deep verify so the report reflects the catalog change.
+    await verify(true)
+  } catch (err) {
+    error.value = String(err)
+  } finally {
+    applying.value = false
+  }
+}
+
+const catalogOnlyIds = computed<number[]>(() => {
+  const report = verifyResult.value?.report
+  if (!report) return []
+  return report.diffs
+    .filter((d) => d.kind === 'catalog_only' && d.catalog_session_id !== null)
+    .map((d) => d.catalog_session_id as number)
+})
 
 async function open(tape: Tape): Promise<void> {
   error.value = ''
@@ -114,10 +216,20 @@ async function saveRename(tape: Tape): Promise<void> {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadStale()
+})
 </script>
 
 <template>
+  <div v-if="staleNotice" class="error-strip" style="margin-bottom: 12px">
+    Catalog may be stale: a tape was erased on {{ formatIso(staleNotice.at) }}
+    but could not be matched to a catalog entry. Use "Verify tape" below to
+    check the loaded cartridge.
+    <button class="danger" style="margin-left: 8px" @click="dismissStale()">Dismiss</button>
+  </div>
+
   <div class="columns">
     <div class="panel half">
       <h3>Catalog search</h3>
@@ -145,12 +257,20 @@ onMounted(load)
 
     <div class="panel half">
       <h3>Tapes</h3>
+      <div class="row-actions" style="margin-bottom: 8px">
+        <button class="primary" :disabled="verifying" @click="verify(false)">
+          {{ verifying ? 'Checking…' : 'Verify tape in drive' }}
+        </button>
+        <button :disabled="verifying" title="Walk the whole tape and compare all sessions with the catalog" @click="verify(true)">
+          Deep verify
+        </button>
+      </div>
       <table class="table">
         <thead>
-          <tr><th>Label</th><th>Status</th><th>Used</th><th>Created</th><th></th></tr>
+          <tr><th>Label</th><th>Status</th><th>Used</th><th>Created</th><th>Verified</th><th></th></tr>
         </thead>
         <tbody>
-          <tr v-if="!tapes.length"><td colspan="5" class="dim">No tapes in the catalog yet.</td></tr>
+          <tr v-if="!tapes.length"><td colspan="6" class="dim">No tapes in the catalog yet.</td></tr>
           <tr v-for="tape in tapes" :key="tape.id">
             <td>
               <input
@@ -165,6 +285,7 @@ onMounted(load)
             <td>{{ tape.status }}</td>
             <td>{{ formatBytes(tape.bytes_used) }}</td>
             <td>{{ formatIso(tape.created_at) }}</td>
+            <td>{{ formatIso(tape.last_verified_at) }}</td>
             <td class="row-actions">
               <template v-if="renamingId === tape.id">
                 <button class="primary" @click="saveRename(tape)">Save</button>
@@ -179,6 +300,57 @@ onMounted(load)
         </tbody>
       </table>
       <p v-if="error" class="error-strip">{{ error }}</p>
+
+      <div v-if="verifyResult" style="margin-top: 12px">
+        <h4>Verify result: {{ verifyResult.status }}</h4>
+        <p class="dim">
+          <template v-if="verifyResult.tape_label || verifyResult.tape_uuid">
+            Tape: {{ verifyResult.tape_label || verifyResult.tape_uuid?.slice(0, 8) }}.
+          </template>
+          {{ verifyResult.detail }}
+        </p>
+        <template v-if="verifyResult.report">
+          <p class="dim">
+            On tape: {{ verifyResult.report.on_tape_count }} session(s);
+            in catalog: {{ verifyResult.report.catalog_count }} non-erased session(s).
+          </p>
+          <table class="table">
+            <thead>
+              <tr><th>Kind</th><th>Position</th><th>Job</th><th>Detail</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="diff in verifyResult.report.diffs" :key="`${diff.kind}-${diff.file_base}`">
+                <td>{{ diff.kind }}</td>
+                <td>t{{ diff.file_base }}</td>
+                <td>{{ diff.job_name || diff.session_id.slice(0, 8) }}</td>
+                <td>{{ diff.detail }}</td>
+                <td>
+                  <button
+                    v-if="diff.kind === 'catalog_only' && diff.catalog_session_id !== null"
+                    class="danger"
+                    :disabled="applying"
+                    @click="markSessionsErased([diff.catalog_session_id])"
+                  >
+                    Mark erased
+                  </button>
+                </td>
+              </tr>
+              <tr v-if="!verifyResult.report.diffs.length">
+                <td colspan="5" class="dim">Tape and catalog are in sync.</td>
+              </tr>
+            </tbody>
+          </table>
+          <button
+            v-if="catalogOnlyIds.length"
+            class="danger"
+            :disabled="applying"
+            style="margin-top: 8px"
+            @click="markSessionsErased(catalogOnlyIds)"
+          >
+            Mark all {{ catalogOnlyIds.length }} missing session(s) erased
+          </button>
+        </template>
+      </div>
     </div>
   </div>
 

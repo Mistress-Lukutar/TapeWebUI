@@ -2,8 +2,8 @@
 File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -168,11 +168,16 @@ class CatalogRepository:
             session.commit()
             return tape
 
-    def mark_tape_erased(self, tape_id: int) -> int:
+    def mark_tape_erased(
+        self, tape_id: int, *, exclude_session_id: int | None = None
+    ) -> int:
         """Mark all sessions of a tape erased (history is kept, not deleted).
 
         Args:
             tape_id: Tape primary key.
+            exclude_session_id: Session to leave untouched (the freshly
+                created session of an overwrite-mode backup that just
+                erased the tape itself).
 
         Returns:
             Number of sessions marked erased.
@@ -183,17 +188,63 @@ class CatalogRepository:
                     select(BackupSession).where(BackupSession.tape_id == tape_id)
                 )
             )
+            marked = 0
             for backup_session in sessions:
+                if backup_session.id == exclude_session_id:
+                    continue
                 backup_session.status = "erased"
+                marked += 1
             tape = session.get(Tape, tape_id)
             if tape is not None:
                 tape.bytes_used = 0
                 tape.status = "active"
+                tape.last_verified_at = None
             session.commit()
-            logger.info(
-                "catalog_tape_marked_erased", tape_id=tape_id, sessions=len(sessions)
-            )
-            return len(sessions)
+            logger.info("catalog_tape_marked_erased", tape_id=tape_id, sessions=marked)
+            return marked
+
+    def set_tape_verified(self, tape_id: int) -> bool:
+        """Stamp the tape as verified against the physical cartridge.
+
+        Args:
+            tape_id: Tape primary key.
+
+        Returns:
+            True if the tape exists and was stamped.
+        """
+        with self._session_factory() as session:
+            tape = session.get(Tape, tape_id)
+            if tape is None:
+                return False
+            tape.last_verified_at = _now()
+            session.commit()
+            return True
+
+    def mark_sessions_erased(self, session_ids: list[int]) -> int:
+        """Mark specific sessions erased (deep-scan apply).
+
+        Args:
+            session_ids: Session primary keys to mark erased.
+
+        Returns:
+            Number of sessions actually marked (unknown ids are skipped).
+        """
+        if not session_ids:
+            return 0
+        marked = 0
+        with self._session_factory() as session:
+            for session_id in session_ids:
+                backup_session = session.get(BackupSession, session_id)
+                if backup_session is None or backup_session.status == "erased":
+                    continue
+                backup_session.status = "erased"
+                marked += 1
+                tape = session.get(Tape, backup_session.tape_id)
+                if tape is not None:
+                    tape.last_verified_at = None
+            session.commit()
+        logger.info("catalog_sessions_marked_erased", count=marked)
+        return marked
 
     # -- sessions and files ----------------------------------------------
 

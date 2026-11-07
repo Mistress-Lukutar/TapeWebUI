@@ -2,8 +2,8 @@
 File:   tapes.py
 Brief:  Tapes, catalog search and history API endpoints.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from tapevaultui.db.models import BackupSession, FileEntry
+from tapevaultui.db.models import BackupSession, FileEntry, Tape
 from tapevaultui.dependencies import CatalogDep
 
 router = APIRouter(prefix="/api", tags=["tapes"])
@@ -27,6 +27,7 @@ class TapeOut(BaseModel):
     bytes_used: int
     created_at: str
     notes: str
+    last_verified_at: str | None = None
 
 
 class TapeUpdate(BaseModel):
@@ -35,6 +36,12 @@ class TapeUpdate(BaseModel):
     label: str | None = None
     status: str | None = None
     notes: str | None = None
+
+
+class SessionsEraseMarkRequest(BaseModel):
+    """Sessions to mark erased (deep-scan apply)."""
+
+    session_ids: list[int]
 
 
 class SessionOut(BaseModel):
@@ -88,18 +95,7 @@ async def list_tapes(catalog: CatalogDep) -> list[TapeOut]:
     Returns:
         Tapes ordered by creation time.
     """
-    return [
-        TapeOut(
-            id=tape.id,
-            uuid=tape.uuid,
-            label=tape.label,
-            status=tape.status,
-            bytes_used=tape.bytes_used,
-            created_at=tape.created_at.isoformat(),
-            notes=tape.notes,
-        )
-        for tape in catalog.list_tapes()
-    ]
+    return [_tape_out(tape) for tape in catalog.list_tapes()]
 
 
 @router.get("/tapes/{tape_id}")
@@ -142,6 +138,9 @@ async def get_tape(tape_id: int, catalog: CatalogDep) -> dict[str, object]:
         "bytes_used": tape.bytes_used,
         "created_at": tape.created_at.isoformat(),
         "notes": tape.notes,
+        "last_verified_at": tape.last_verified_at.isoformat()
+        if tape.last_verified_at
+        else None,
         "sessions": [session.model_dump() for session in sessions],
     }
 
@@ -171,15 +170,7 @@ async def update_tape(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if tape is None:
         raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
-    return TapeOut(
-        id=tape.id,
-        uuid=tape.uuid,
-        label=tape.label,
-        status=tape.status,
-        bytes_used=tape.bytes_used,
-        created_at=tape.created_at.isoformat(),
-        notes=tape.notes,
-    )
+    return _tape_out(tape)
 
 
 @router.post("/tapes/{tape_id}/erase-mark")
@@ -199,6 +190,31 @@ async def erase_mark_tape(tape_id: int, catalog: CatalogDep) -> TapeNotesUpdateR
     if catalog.get_tape(tape_id) is None:
         raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
     count = catalog.mark_tape_erased(tape_id)
+    return TapeNotesUpdateResponse(erased_sessions=count)
+
+
+@router.post("/tapes/{tape_id}/sessions/erase-mark")
+async def erase_mark_sessions(
+    tape_id: int, payload: SessionsEraseMarkRequest, catalog: CatalogDep
+) -> TapeNotesUpdateResponse:
+    """Mark specific sessions of a tape erased (deep-scan apply).
+
+    Args:
+        tape_id: Tape primary key.
+        payload: Session ids to mark erased; foreign ids are ignored.
+        catalog: Catalog repository.
+
+    Returns:
+        Number of sessions actually marked erased.
+
+    Raises:
+        HTTPException: 404 if the tape does not exist.
+    """
+    if catalog.get_tape(tape_id) is None:
+        raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
+    known_ids = {session.id for session in catalog.list_sessions(tape_id)}
+    valid_ids = [sid for sid in payload.session_ids if sid in known_ids]
+    count = catalog.mark_sessions_erased(valid_ids)
     return TapeNotesUpdateResponse(erased_sessions=count)
 
 
@@ -304,6 +320,29 @@ async def history(
         }
         for run in runs
     ]
+
+
+def _tape_out(tape: Tape) -> TapeOut:
+    """Convert a Tape row to the API model.
+
+    Args:
+        tape: Catalog tape row.
+
+    Returns:
+        TapeOut payload.
+    """
+    return TapeOut(
+        id=tape.id,
+        uuid=tape.uuid,
+        label=tape.label,
+        status=tape.status,
+        bytes_used=tape.bytes_used,
+        created_at=tape.created_at.isoformat(),
+        notes=tape.notes,
+        last_verified_at=tape.last_verified_at.isoformat()
+        if tape.last_verified_at
+        else None,
+    )
 
 
 def _file_out(entry: FileEntry) -> FileOut:

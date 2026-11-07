@@ -2,8 +2,8 @@
 File:   test_api.py
 Brief:  API smoke tests against the app with the fake transport.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -42,13 +42,23 @@ def test_drive_refresh(client: TestClient) -> None:
 
 
 def test_drive_erase(client: TestClient) -> None:
-    """Erase issues rewind + short erase and returns refreshed status."""
+    """Erase identifies the tape, erases, and returns refreshed status.
+
+    The default fake reads an empty tape, so attribution fails and a
+    stale-catalog notice is recorded instead of a catalog sync.
+    """
     transport = client.app.state.transport  # type: ignore[attr-defined]
     transport.commands.clear()
     response = client.post("/api/drive/erase")
     assert response.status_code == 200
-    assert response.json()["reachable"] is True
+    body = response.json()
+    assert body["status"]["reachable"] is True
+    assert "may be stale" in body["catalog_message"]
+    # Attribution (rewind+read+rewind), erase (rewind+erase), refresh.
     assert [cmd[0] for cmd in transport.commands] == [
+        "rewind",
+        "read",
+        "rewind",
         "rewind",
         "erase",
         "vpd",
@@ -56,3 +66,5 @@ def test_drive_erase(client: TestClient) -> None:
         "getparms",
     ]
     assert ("erase", "-short") in transport.commands
+    notice = client.get("/api/sync/stale-notice").json()
+    assert notice is not None and notice["reason"] == "unattributed_erase"

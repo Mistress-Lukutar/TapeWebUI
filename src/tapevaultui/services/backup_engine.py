@@ -2,8 +2,8 @@
 File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -267,12 +267,18 @@ class BackupEngine:
         tape_id, tape_row = await self._prepare_tape_or_wait(stats, wait_for_media)
         stats.tape_id = tape_id
 
+        if definition.options.mode == "overwrite":
+            # The erase wipes the whole cartridge: prior sessions become
+            # unreadable, so they are marked erased BEFORE the new
+            # session is created — its file_base then restarts at 0,
+            # matching the physical position of the fresh header.
+            await erase_tape_short(self._transport)
+            self._catalog.mark_tape_erased(tape_row.id)
+
         session = self._catalog.create_session(tape_row.id, job_name=definition.name)
         stats.session_id = new_session_id()
 
-        if definition.options.mode == "overwrite":
-            await erase_tape_short(self._transport)
-        else:
+        if definition.options.mode != "overwrite":
             await space_to_end_of_data(self._transport)
 
         header = build_session_header(

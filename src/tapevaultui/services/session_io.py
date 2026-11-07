@@ -2,8 +2,8 @@
 File:   session_io.py
 Brief:  Session header (t0) read/write helpers on top of the ITDT transport.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -199,6 +199,53 @@ async def read_session_header(
     if header is None:
         logger.info("foreign_tape_detected")
     return header
+
+
+async def read_header_at_current_position(
+    transport: ItDtTransport | FakeItDtTransport,
+    work_dir: Path,
+) -> SessionHeader | None:
+    """Read and parse a session header at the current tape position.
+
+    Like :func:`read_session_header`, but never repositions the tape:
+    the caller controls positioning (the deep-scan content walker steps
+    through the tape itself).
+
+    Args:
+        transport: ITDT transport (real or fake).
+        work_dir: Directory for the temp download file.
+
+    Returns:
+        Parsed SessionHeader, or None for a foreign/blank read (nothing
+        readable at the current position).
+
+    Raises:
+        SessionIoError: If the ITDT read command fails.
+        TapeFormatError: If the tape holds an incompatible future header.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = work_dir / f"hdr_{uuid.uuid4().hex[:8]}.bin"
+
+    result = await transport.run(["read", "-d", str(temp_file)])
+    if result.exit_code != 0:
+        stdout = result.stdout.strip()
+        if temp_file.exists():
+            temp_file.unlink()
+        if (
+            "filemark" in stdout.lower()
+            or "end of data" in stdout.lower()
+            or _looks_like_blank_read(stdout)
+        ):
+            return None  # nothing readable at this position
+        raise SessionIoError(f"ITDT read of session header failed: {stdout}")
+
+    try:
+        raw = temp_file.read_bytes()
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    return parse_header(raw)
 
 
 async def identify_tape(

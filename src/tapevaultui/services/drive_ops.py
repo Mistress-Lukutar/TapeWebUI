@@ -2,8 +2,8 @@
 File:   drive_ops.py
 Brief:  Manual drive/media operations (ITDT-SE service commands) for the Service page.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations

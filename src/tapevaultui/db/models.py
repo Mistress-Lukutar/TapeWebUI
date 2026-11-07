@@ -2,8 +2,8 @@
 File:   models.py
 Brief:  SQLAlchemy 2.0 catalog models (tapes, sessions, files, jobs, runs).
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -31,6 +31,11 @@ class Tape(Base):
     status: Mapped[str] = mapped_column(String(16), default="active")
     bytes_used: Mapped[int] = mapped_column(default=0)
     notes: Mapped[str] = mapped_column(String(1024), default="")
+    # Last time a verify matched the physical cartridge to this entry;
+    # NULL = never verified. Cleared when the tape is marked erased.
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class BackupSession(Base):

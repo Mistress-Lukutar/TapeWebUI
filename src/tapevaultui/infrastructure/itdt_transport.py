@@ -2,8 +2,8 @@
 File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -269,6 +269,7 @@ class FakeItDtTransport:
         *,
         command_scenarios: dict[tuple[str, ...], tuple[str, int]] | None = None,
         default_response: tuple[str, int] = ("", 0),
+        tape_files: list[bytes] | None = None,
     ) -> None:
         """Initialize the fake.
 
@@ -277,12 +278,20 @@ class FakeItDtTransport:
             command_scenarios: Exact full-command matches (checked first),
                 e.g. ``("write", "-raw", "-s", "D:/a.txt")``.
             default_response: Response for subcommands not in scenarios.
+            tape_files: When given, enables the position-aware tape
+                simulation: ``rewind``/``fsf`` move a virtual head over
+                the list and ``read -d`` writes ``tape_files[position]``
+                to the destination file (or reports end of data). An
+                ``erase`` clears the list. Reads bypass the scenario
+                table in this mode.
         """
         self.scenarios = scenarios if scenarios is not None else {}
         self.command_scenarios = (
             command_scenarios if command_scenarios is not None else {}
         )
         self.default_response = default_response
+        self.tape_files = tape_files
+        self.position = 0
         self.commands: list[tuple[str, ...]] = []
         self.device_name = "\\\\.\\tape0"
 
@@ -335,6 +344,8 @@ class FakeItDtTransport:
             stdout, exit_code = self.command_scenarios[key]
         else:
             stdout, exit_code = self.scenarios.get(args[0], self.default_response)
+        if self.tape_files is not None:
+            stdout, exit_code = self._run_tape_simulation(args)
         if args[0] == "read" and "-d" in args:
             destination = Path(args[args.index("-d") + 1])
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -346,6 +357,31 @@ class FakeItDtTransport:
             stderr="",
             duration_s=0.0,
         )
+
+    def _run_tape_simulation(self, args: list[str]) -> tuple[str, int]:
+        """Handle one command against the simulated tape contents.
+
+        Args:
+            args: ITDT subcommand and its arguments.
+
+        Returns:
+            (stdout, exit_code) for the simulated tape.
+        """
+        if args[0] == "rewind":
+            self.position = 0
+            return ("Rewinding tape...", 0)
+        if args[0] == "fsf":
+            self.position += int(args[1])
+            return ("Spacing forward...", 0)
+        if args[0] == "erase":
+            self.tape_files.clear()
+            self.position = 0
+            return ("Erasing tape...", 0)
+        if args[0] == "read":
+            if self.position >= len(self.tape_files):
+                return ("End of data reached", 1)
+            return (self.tape_files[self.position].decode("utf-8"), 0)
+        return self.scenarios.get(args[0], self.default_response)
 
     async def stream(self, args: list[str]) -> AsyncIterator[str]:
         """Yield the scenario response as one line (interface compatibility).

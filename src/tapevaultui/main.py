@@ -2,8 +2,8 @@
 File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from tapevaultui.routers import restore as restore_router
 from tapevaultui.routers import schedules as schedules_router
 from tapevaultui.routers import service as service_router
 from tapevaultui.routers import settings as settings_router
+from tapevaultui.routers import sync as sync_router
 from tapevaultui.routers import tapes as tapes_router
 from tapevaultui.services.app_settings import AppSettingsService
 from tapevaultui.services.backup_engine import BackupEngine
@@ -207,6 +208,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules_router.router)
     app.include_router(service_router.router)
     app.include_router(settings_router.router)
+    app.include_router(sync_router.router)
 
     @app.get("/events")
     async def events() -> StreamingResponse:

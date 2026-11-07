@@ -2,13 +2,14 @@
 File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
@@ -20,10 +21,18 @@ from tapevaultui.services.backup_engine import (
 from tapevaultui.services.catalog import CatalogRepository
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefinition
+from tapevaultui.services.session_io import new_session_id
+from tapevaultui.services.tape_format import (
+    build_session_header,
+    serialize_header,
+)
 
 
 def _definition(
-    tmp_path: Path, verify: str = "readback", continue_on_error: bool = True
+    tmp_path: Path,
+    verify: str = "readback",
+    continue_on_error: bool = True,
+    mode: str = "append",
 ) -> JobDefinition:
     """Build a one-source job over the test tree.
 
@@ -31,6 +40,7 @@ def _definition(
         tmp_path: Pytest temp dir holding the source tree.
         verify: Verify option value.
         continue_on_error: continue_on_error option value.
+        mode: Backup mode (append | overwrite).
 
     Returns:
         A JobDefinition.
@@ -40,7 +50,7 @@ def _definition(
             "name": "testjob",
             "sources": [{"path": str(tmp_path / "src")}],
             "options": {
-                "mode": "append",
+                "mode": mode,
                 "verify": verify,
                 "continue_on_error": continue_on_error,
             },
@@ -116,6 +126,49 @@ async def test_backup_registers_tape_and_session(tmp_path: Path) -> None:
     files = repo.list_files(sessions[0].id)
     assert [f.tape_file_index for f in files] == [0, 1]
     assert sessions[0].status == "ok"
+
+
+async def test_overwrite_marks_prior_sessions_erased(tmp_path: Path) -> None:
+    """Overwrite erases the tape and syncs the catalog in the right order.
+
+    Prior sessions become erased and the fresh session's file_base
+    restarts at 0, matching the physical position after the erase.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    tape = repo.register_tape("tape-uuid-1")
+    old_session = repo.create_session(tape.id, job_name="old")
+    repo.finish_session(old_session.id, status="ok")
+
+    header = build_session_header(
+        tape_id="tape-uuid-1",
+        session_id=new_session_id(),
+        started_at=datetime.now(UTC),
+    )
+    fake = FakeItDtTransport(tape_files=[serialize_header(header)])
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = await engine.execute(
+        _definition(tmp_path, verify="none", mode="overwrite"), BackupStats("testjob")
+    )
+
+    assert stats.files_done == 1
+    sessions = repo.list_sessions(tape.id)
+    by_seq = {s.tape_seq: s for s in sessions}
+    assert by_seq[0].status == "erased"  # the pre-overwrite session
+    assert by_seq[1].status == "ok"  # the fresh overwrite session
+    assert by_seq[1].file_base == 0
+    # Erase must precede the session creation: identify (rewind+read+
+    # rewind), then erase (rewind+erase), then the header write.
+    assert [cmd[0] for cmd in fake.commands][:5] == [
+        "rewind",
+        "read",
+        "rewind",
+        "rewind",
+        "erase",
+    ]
 
 
 async def test_verify_readback_updates_files(tmp_path: Path) -> None:
