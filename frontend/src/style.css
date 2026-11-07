@@ -602,3 +602,46 @@ button.danger:hover:not(:disabled) {
   color: var(--accent);
   margin-top: 8px;
 }
+
+.ignore-editor {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.ignore-editor h4 {
+  margin: 4px 0 8px;
+}
+
+.rule-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.rule-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.tag-remove {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tag-remove:hover {
+  color: var(--danger, #e05555);
+}

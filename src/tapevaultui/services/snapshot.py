@@ -2,16 +2,18 @@
 File:   snapshot.py
 Brief:  Source file snapshotting: walk, pattern filter, sizes and sha256.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from fnmatch import fnmatch
 from pathlib import Path
 
+import pathspec
 import structlog
 from pydantic import BaseModel, Field
 
@@ -78,6 +80,35 @@ def _matches_any(name: str, patterns: list[str]) -> bool:
     return False
 
 
+def _iter_unignored(
+    root: Path, spec: pathspec.GitIgnoreSpec | None
+) -> Iterator[Path]:
+    """Yield files under root, pruning directories the spec ignores.
+
+    Args:
+        root: Source root directory.
+        spec: Compiled gitignore spec, or None for no exclusions.
+
+    Yields:
+        File paths not matched by the ignore spec. Ignored directories
+        are skipped entirely, so negated (``!``) rules cannot re-include
+        files beneath an ignored parent (same as real gitignore).
+    """
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        for entry in sorted(directory.iterdir()):
+            if spec is not None:
+                relative = entry.relative_to(root).as_posix()
+                probe = f"{relative}/" if entry.is_dir() else relative
+                if spec.match_file(probe):
+                    continue
+            if entry.is_dir():
+                stack.append(entry)
+            else:
+                yield entry
+
+
 def snapshot_sources(
     sources: list[SourceDef],
     *,
@@ -85,8 +116,10 @@ def snapshot_sources(
 ) -> list[PlannedFile]:
     """Walk all sources and build the file plan with hashes.
 
-    Files are deduplicated by absolute path; hashing failures either skip
-    the file (continue_on_error) or abort the snapshot.
+    Each source may carry gitignore-style ``excludes`` patterns; ignored
+    directories are pruned whole. Files are deduplicated by absolute
+    path; hashing failures either skip the file (continue_on_error) or
+    abort the snapshot.
 
     Args:
         sources: Source definitions from the job.
@@ -108,7 +141,12 @@ def snapshot_sources(
                 logger.warning("snapshot_source_missing", path=str(root))
                 continue
             raise SnapshotError(message)
-        for file_path in sorted(root.rglob("*")):
+        spec = (
+            pathspec.GitIgnoreSpec.from_lines(source.excludes)
+            if source.excludes
+            else None
+        )
+        for file_path in sorted(_iter_unignored(root, spec)):
             if not file_path.is_file():
                 continue
             relative = file_path.relative_to(root).as_posix()

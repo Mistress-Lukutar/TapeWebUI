@@ -2,8 +2,8 @@
 File:   test_jobs_api.py
 Brief:  Jobs API endpoint tests (CRUD, run, cancel, runtime status).
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -66,6 +66,31 @@ def test_job_create_validation_error(client: TestClient) -> None:
     response = client.post("/api/jobs", json={"content": "name: [broken"})
     assert response.status_code == 422
     assert "detail" in response.json()
+
+
+def test_job_excludes_roundtrip(client: TestClient) -> None:
+    """Excludes survive create/read over the API."""
+    yaml_with_excludes = JOB_YAML.replace(
+        '    patterns: ["**/*.jpg"]',
+        '    patterns: ["**/*.jpg"]\n    excludes: ["temp/", "*.tmp"]',
+    )
+    response = client.post("/api/jobs", json={"content": yaml_with_excludes})
+    assert response.status_code == 201, response.text
+
+    stored = client.get("/api/jobs/apijob")
+    assert stored.status_code == 200
+    assert "temp/" in stored.json()["yaml"]
+    assert "*.tmp" in stored.json()["yaml"]
+
+
+def test_job_backslash_exclude_422(client: TestClient) -> None:
+    """An ignore pattern with a backslash separator is rejected."""
+    bad = JOB_YAML.replace(
+        '    patterns: ["**/*.jpg"]', '    excludes: ["temp\\\\"]'
+    )
+    response = client.post("/api/jobs", json={"content": bad})
+    assert response.status_code == 422
+    assert "path separator" in response.json()["detail"]
 
 
 def test_run_unknown_job_404(client: TestClient) -> None:

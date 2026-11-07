@@ -2,8 +2,8 @@
 File:   job_defs.py
 Brief:  YAML job definitions: pydantic schema, loader and store (data/jobs).
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -24,13 +24,45 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class SourceDef(BaseModel):
-    """One backup source directory with optional include patterns."""
+    """One backup source directory with include and exclude patterns."""
 
     path: str = Field(description="Source directory path")
     patterns: list[str] = Field(
         default_factory=list,
         description="glob patterns relative to path; empty = all files",
     )
+    excludes: list[str] = Field(
+        default_factory=list,
+        description="gitignore-style ignore patterns relative to path",
+    )
+
+    @field_validator("excludes")
+    @classmethod
+    def _check_excludes(cls, value: list[str]) -> list[str]:
+        """Normalize ignore patterns and reject Windows separators.
+
+        Args:
+            value: Raw pattern list from YAML.
+
+        Returns:
+            Stripped, de-duplicated patterns in original order.
+
+        Raises:
+            ValueError: If a pattern contains a backslash separator.
+        """
+        cleaned: list[str] = []
+        for pattern in value:
+            stripped = pattern.strip()
+            if not stripped:
+                continue
+            if "\\" in stripped:
+                raise ValueError(
+                    f"Ignore pattern {stripped!r} contains '\\\\': "
+                    "use '/' as the path separator"
+                )
+            if stripped not in cleaned:
+                cleaned.append(stripped)
+        return cleaned
 
 
 class JobOptions(BaseModel):

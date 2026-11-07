@@ -2,8 +2,8 @@
 File:   test_snapshot.py
 Brief:  Source snapshotter tests: walking, patterns, hashing, errors.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -53,6 +53,51 @@ def test_snapshot_with_patterns(source_tree: Path) -> None:
     plan = snapshot_sources([SourceDef(path=str(source_tree), patterns=["**/*.jpg"])])
     names = sorted(Path(f.path).name for f in plan)
     assert names == ["a.jpg", "c.jpg"]
+
+
+def test_snapshot_excludes_dir_prunes_subtree(tmp_path: Path) -> None:
+    """An ignored directory is pruned whole, including deep files."""
+    root = tmp_path / "src"
+    (root / "temp" / "deep").mkdir(parents=True)
+    (root / "keep.txt").write_bytes(b"K")
+    (root / "temp" / "junk.tmp").write_bytes(b"J")
+    (root / "temp" / "deep" / "buried.tmp").write_bytes(b"B")
+    plan = snapshot_sources([SourceDef(path=str(root), excludes=["temp/"])])
+    assert [Path(f.path).name for f in plan] == ["keep.txt"]
+
+
+def test_snapshot_excludes_by_extension(source_tree: Path) -> None:
+    """``**/*.jpg`` drops jpg files at any depth, keeps the rest."""
+    plan = snapshot_sources([SourceDef(path=str(source_tree), excludes=["**/*.jpg"])])
+    names = sorted(Path(f.path).name for f in plan)
+    assert names == ["b.txt"]
+
+
+def test_snapshot_excludes_negation(tmp_path: Path) -> None:
+    """A negated rule re-includes a file that other rules ignore."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.tmp").write_bytes(b"A")
+    (root / "keep.tmp").write_bytes(b"K")
+    plan = snapshot_sources(
+        [SourceDef(path=str(root), excludes=["*.tmp", "!keep.tmp"])]
+    )
+    assert [Path(f.path).name for f in plan] == ["keep.tmp"]
+
+
+def test_snapshot_excludes_combined_with_patterns(tmp_path: Path) -> None:
+    """Include patterns and excludes apply together."""
+    root = tmp_path / "src"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.jpg").write_bytes(b"A")
+    (root / "b.jpg").write_bytes(b"B")
+    (root / "c.txt").write_bytes(b"C")
+    (root / "sub" / "d.jpg").write_bytes(b"D")
+    plan = snapshot_sources(
+        [SourceDef(path=str(root), patterns=["**/*.jpg"], excludes=["b.jpg"])]
+    )
+    names = sorted(Path(f.path).name for f in plan)
+    assert names == ["a.jpg", "d.jpg"]
 
 
 def test_snapshot_missing_root_continue(source_tree: Path) -> None:

@@ -2,8 +2,8 @@
 File:   test_job_defs.py
 Brief:  Job definition schema and YAML store tests.
 Author: Mistress-Lukutar
-Date:   2026-11-06
-Version: v0.6.3
+Date:   2026-11-07
+Version: v0.7.0
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from tapevaultui.services.job_defs import (
     JobDefinition,
     JobDefsError,
     JobDefStore,
+    SourceDef,
 )
 
 VALID_YAML = """
@@ -24,6 +25,7 @@ name: photos
 sources:
   - path: "D:/Photos"
     patterns: ["**/*.jpg"]
+    excludes: ["temp/", "*.tmp"]
 options:
   mode: append
   verify: readback
@@ -43,6 +45,7 @@ def test_parse_and_save_load_roundtrip(tmp_path: Path) -> None:
     assert definition.name == "photos"
     assert definition.options.mode == "append"
     assert definition.schedule.days == ["sat"]
+    assert definition.sources[0].excludes == ["temp/", "*.tmp"]
 
     store.save(definition)
     loaded = store.load("photos")
@@ -117,3 +120,21 @@ def test_job_definition_model() -> None:
     """The JobDefinition model requires at least one source."""
     with pytest.raises(ValidationError):
         JobDefinition(name="empty", sources=[])
+
+
+def test_excludes_normalized() -> None:
+    """Excludes are stripped, de-duplicated, and may be omitted."""
+    source = SourceDef(
+        path="D:/x", excludes=[" temp/ ", "*.tmp", "", "*.tmp", "  "]
+    )
+    assert source.excludes == ["temp/", "*.tmp"]
+    assert SourceDef(path="D:/x").excludes == []
+
+
+def test_excludes_backslash_rejected(tmp_path: Path) -> None:
+    """Ignore patterns with Windows separators are rejected."""
+    store = JobDefStore(tmp_path)
+    with pytest.raises(JobDefsError, match="path separator"):
+        store.parse_yaml(
+            'name: x\nsources:\n  - path: D:/x\n    excludes: ["temp\\\\"]\n'
+        )

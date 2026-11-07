@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { dump as yamlDump, load as yamlLoad } from 'js-yaml'
 import { apiGet, apiSend, formatIso } from '../api'
 import { useRuntimeStore } from '../composables/useRuntimeStore'
 
@@ -10,6 +11,11 @@ interface JobRow {
   yaml: string
 }
 
+interface YamlSource {
+  path?: unknown
+  excludes?: unknown
+}
+
 const runtime = useRuntimeStore()
 const jobs = ref<JobRow[]>([])
 const selected = ref<JobRow | null>(null)
@@ -17,6 +23,84 @@ const editorText = ref('')
 const error = ref('')
 const notice = ref('')
 const busy = ref(false)
+
+const ignoreSourceIdx = ref(0)
+const ignoreRules = ref<string[]>([])
+const newRule = ref('')
+const ignoreDirty = ref(false)
+
+const parsedSources = computed<YamlSource[]>(() => {
+  try {
+    const doc = yamlLoad(editorText.value)
+    if (doc && typeof doc === 'object' && Array.isArray((doc as { sources?: unknown }).sources)) {
+      return (doc as { sources: YamlSource[] }).sources
+    }
+  } catch {
+    // Unparseable YAML: the panel reports it below.
+  }
+  return []
+})
+
+const ignoreParseError = computed(() => {
+  try {
+    yamlLoad(editorText.value)
+    return ''
+  } catch (err) {
+    return `YAML parse error: ${err instanceof Error ? err.message : String(err)}`
+  }
+})
+
+watch(parsedSources, (sources) => {
+  if (ignoreSourceIdx.value >= sources.length) ignoreSourceIdx.value = 0
+})
+
+function pickIgnoreSource(): void {
+  const source = parsedSources.value[ignoreSourceIdx.value]
+  const excludes = source && Array.isArray(source.excludes) ? source.excludes : []
+  ignoreRules.value = excludes.filter((rule): rule is string => typeof rule === 'string')
+  ignoreDirty.value = false
+}
+
+function addRule(): void {
+  const rule = newRule.value.trim()
+  if (!rule || ignoreRules.value.includes(rule)) {
+    newRule.value = ''
+    return
+  }
+  ignoreRules.value.push(rule)
+  newRule.value = ''
+  ignoreDirty.value = true
+}
+
+function removeRule(idx: number): void {
+  ignoreRules.value.splice(idx, 1)
+  ignoreDirty.value = true
+}
+
+function applyIgnoreRules(): void {
+  error.value = ''
+  try {
+    const doc = yamlLoad(editorText.value) as { sources?: YamlSource[] } | null
+    if (!doc || !Array.isArray(doc.sources)) {
+      error.value = 'Job YAML has no sources to attach rules to'
+      return
+    }
+    const source = doc.sources[ignoreSourceIdx.value]
+    if (!source || typeof source !== 'object') {
+      error.value = 'Selected source no longer exists in the YAML'
+      return
+    }
+    if (ignoreRules.value.length) {
+      source.excludes = [...ignoreRules.value]
+    } else {
+      delete source.excludes
+    }
+    editorText.value = yamlDump(doc, { lineWidth: -1, noRefs: true })
+    ignoreDirty.value = false
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
 
 async function load(): Promise<void> {
   try {
@@ -31,11 +115,17 @@ function select(job: JobRow): void {
   editorText.value = job.yaml
   error.value = ''
   notice.value = ''
+  ignoreSourceIdx.value = 0
+  pickIgnoreSource()
 }
 
 function blank(): void {
   selected.value = null
-  editorText.value = `name: newjob\nsources:\n  - path: "D:/Data"\noptions:\n  mode: append\n  verify: readback\n  continue_on_error: true\nschedule:\n  kind: manual\n`
+  editorText.value = `name: newjob\nsources:\n  - path: "D:/Data"\n    excludes: ["temp/", "*.tmp"]\noptions:\n  mode: append\n  verify: readback\n  continue_on_error: true\nschedule:\n  kind: manual\n`
+  error.value = ''
+  notice.value = ''
+  ignoreSourceIdx.value = 0
+  pickIgnoreSource()
 }
 
 async function save(): Promise<void> {
@@ -119,6 +209,49 @@ onMounted(load)
     <div class="panel half">
       <h3>{{ selected ? `Edit: ${selected.name}` : 'New job (YAML)' }}</h3>
       <textarea v-model="editorText" class="yaml-editor" spellcheck="false"></textarea>
+      <div class="ignore-editor">
+        <h4>Ignore rules <span class="dim">(gitignore syntax, per source)</span></h4>
+        <p v-if="ignoreParseError" class="error-strip">{{ ignoreParseError }}</p>
+        <template v-else>
+          <div class="row-actions">
+            <select v-model.number="ignoreSourceIdx" @change="pickIgnoreSource()">
+              <option v-for="(source, idx) in parsedSources" :key="idx" :value="idx">
+                {{ typeof source.path === 'string' ? source.path : `source ${idx + 1}` }}
+              </option>
+            </select>
+            <span v-if="!parsedSources.length" class="dim">No sources in YAML</span>
+          </div>
+          <div class="rule-tags">
+            <span v-for="(rule, idx) in ignoreRules" :key="rule + idx" class="rule-tag">
+              {{ rule }}
+              <button class="tag-remove" title="Remove rule" @click="removeRule(idx)">×</button>
+            </span>
+            <span v-if="!ignoreRules.length" class="dim">No ignore rules for this source.</span>
+          </div>
+          <div class="row-actions">
+            <input
+              v-model="newRule"
+              placeholder="temp/, *.tmp, cache/**, !keep.tmp"
+              @keyup.enter="addRule()"
+            />
+            <button :disabled="!newRule.trim() || !parsedSources.length" @click="addRule()">
+              Add
+            </button>
+            <button
+              class="primary"
+              :disabled="!ignoreDirty || !parsedSources.length"
+              @click="applyIgnoreRules()"
+            >
+              Apply to YAML
+            </button>
+          </div>
+          <p class="dim">
+            Directories match with a trailing slash (temp/), * matches within a
+            path segment, ** across segments, ! re-includes. Files under an
+            ignored directory cannot be re-included.
+          </p>
+        </template>
+      </div>
       <div class="row-actions" style="margin-top: 8px">
         <button class="primary" :disabled="busy" @click="save()">Validate &amp; save</button>
       </div>
