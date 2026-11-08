@@ -2,8 +2,8 @@
 File:   job_defs.py
 Brief:  YAML job definitions: pydantic schema, loader and store (data/jobs).
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -34,6 +34,14 @@ class SourceDef(BaseModel):
     excludes: list[str] = Field(
         default_factory=list,
         description="gitignore-style ignore patterns relative to path",
+    )
+    archive: bool = Field(
+        default=False,
+        description=(
+            "store the whole source as one staged zip tape file instead "
+            "of individual files (incremental skips the source while "
+            "its content is unchanged)"
+        ),
     )
 
     @field_validator("excludes")
@@ -71,6 +79,16 @@ class JobOptions(BaseModel):
     mode: Literal["append", "overwrite"] = "append"
     verify: Literal["none", "readback"] = "readback"
     continue_on_error: bool = True
+    backup_type: Literal["full", "incremental"] = "full"
+    full_every_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        description=(
+            "incremental only: force a full run when the newest full "
+            "session of this job is older than this many days"
+        ),
+    )
 
 
 class ScheduleSpec(BaseModel):

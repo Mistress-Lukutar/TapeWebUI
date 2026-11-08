@@ -2,8 +2,8 @@
 File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 
@@ -22,9 +23,10 @@ from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtTransport,
 )
+from tapevaultui.services.archive_builder import plan_archive_source
 from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
 from tapevaultui.services.event_bus import EventBus
-from tapevaultui.services.job_defs import JobDefinition
+from tapevaultui.services.job_defs import JobDefinition, SourceDef
 from tapevaultui.services.session_io import (
     NoMediaError,
     SessionIoError,
@@ -161,6 +163,7 @@ class BackupEngine:
         catalog: CatalogRepository,
         work_dir: Path,
         event_bus: EventBus,
+        staging_dir: Path | None = None,
     ) -> None:
         """Initialize the engine.
 
@@ -169,10 +172,14 @@ class BackupEngine:
             catalog: Catalog repository.
             work_dir: Directory for temp files (headers, verify downloads).
             event_bus: Bus for job progress publications.
+            staging_dir: Persistent cache directory for archive-source
+                zips + manifests (defaults to <data>/staging, derived
+                from work_dir).
         """
         self._transport = transport
         self._catalog = catalog
         self._work_dir = work_dir
+        self._staging_dir = staging_dir or work_dir.parent / "staging"
         self._event_bus = event_bus
 
     async def publish(self, stats: BackupStats) -> None:
@@ -193,6 +200,17 @@ class BackupEngine:
     ) -> BackupStats:
         """Run a backup job to completion.
 
+        Incremental jobs compare the plan against the catalog's latest
+        backed-up version per path (any tape, any session kind) and
+        write only changed files; a full run is forced when the newest
+        full session is older than ``full_every_days`` or missing. An
+        incremental run with no changes touches no tape at all.
+
+        Archive sources (``archive: true``) contribute one entry each:
+        the whole tree is staged as a zip in the staging cache, and an
+        incremental run skips the source entirely while its content
+        manifest hash matches the newest archive already written.
+
         Args:
             definition: The job to execute.
             stats: Progress accumulator (run_id may be preset).
@@ -210,11 +228,19 @@ class BackupEngine:
         stats.state = "preparing"
         await self.publish(stats)
 
+        kind, baseline = self._decide_kind_and_baseline(definition)
+        plain_sources = [s for s in definition.sources if not s.archive]
+        archive_sources = [s for s in definition.sources if s.archive]
         plan = await asyncio.to_thread(
             snapshot_sources,
-            definition.sources,
+            plain_sources,
             continue_on_error=definition.options.continue_on_error,
+            baseline=baseline,
         )
+        plan.extend(
+            await self._plan_archives(definition, archive_sources, kind=kind)
+        )
+        plan.sort(key=lambda item: item.path)
         if cancel_check and cancel_check():
             raise JobCancelled("cancelled during preparation")
 
@@ -222,17 +248,122 @@ class BackupEngine:
         stats.bytes_total = sum(file.size for file in plan)
         await self.publish(stats)
 
+        if not plan and kind == "incremental":
+            logger.info(
+                "backup_no_changes", job=definition.name, kind=kind
+            )
+            return stats
+
         remaining = list(plan)
         while remaining:
             processed = await self._write_tape_pass(
                 definition,
                 remaining,
                 stats,
+                kind=kind,
                 cancel_check=cancel_check,
                 wait_for_media=wait_for_media,
             )
             remaining = remaining[processed:]
         return stats
+
+    def _decide_kind_and_baseline(
+        self, definition: JobDefinition
+    ) -> tuple[Literal["full", "incremental"], dict[str, tuple[int, float]] | None]:
+        """Pick the session kind and the incremental change baseline.
+
+        Overwrite mode always runs full (the erase wipes the baseline
+        tape anyway). Incremental runs fall back to full when the
+        newest live full session is older than ``full_every_days``.
+
+        Args:
+            definition: The job to execute.
+
+        Returns:
+            (kind, baseline) where baseline is None for full runs.
+        """
+        if (
+            definition.options.backup_type != "incremental"
+            or definition.options.mode == "overwrite"
+        ):
+            return "full", None
+        last_full = self._catalog.latest_full_session(definition.name)
+        if last_full is None:
+            return "full", None
+        # SQLite returns naive datetimes; stored values are UTC.
+        started = last_full.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        age_days = (datetime.now(UTC) - started).total_seconds() / 86400
+        if age_days >= definition.options.full_every_days:
+            return "full", None
+        versions = self._catalog.latest_job_file_versions(definition.name)
+        baseline: dict[str, tuple[int, float]] = {}
+        for path, (_, size, mtime) in versions.items():
+            # SQLite returns naive datetimes; stored values are UTC.
+            if mtime.tzinfo is None:
+                mtime = mtime.replace(tzinfo=UTC)
+            baseline[path] = (size, mtime.timestamp())
+        return "incremental", baseline
+
+    async def _plan_archives(
+        self,
+        definition: JobDefinition,
+        archive_sources: list[SourceDef],
+        *,
+        kind: Literal["full", "incremental"],
+    ) -> list[PlannedFile]:
+        """Plan the archive sources into staged zip entries.
+
+        Each source is planned in a worker thread (hash-all content
+        walk). An incremental run skips a source whose manifest hash
+        matches the newest archive already written; a full run reuses
+        the cached zip without rebuilding but still writes it. Failures
+        follow ``continue_on_error``: unreadable sources are logged and
+        skipped, otherwise the error aborts the run.
+
+        Args:
+            definition: The job being executed.
+            archive_sources: Sources with ``archive=True``.
+            kind: Session kind (skip check is incremental-only).
+
+        Returns:
+            Planned archive entries (empty when all skipped).
+
+        Raises:
+            BackupEngineError: On a source failure with
+                continue_on_error=False.
+        """
+        written = (
+            self._catalog.latest_archive_versions(definition.name)
+            if kind == "incremental"
+            else {}
+        )
+        planned: list[PlannedFile] = []
+        for source in archive_sources:
+            _, manifest_sha = written.get(source.path, ("", ""))
+            try:
+                entry = await asyncio.to_thread(
+                    plan_archive_source,
+                    source,
+                    staging_dir=self._staging_dir,
+                    written_manifest_sha=manifest_sha or None,
+                    write_even_if_unchanged=kind == "full",
+                )
+            except Exception as exc:
+                if definition.options.continue_on_error:
+                    logger.warning(
+                        "archive_source_failed",
+                        path=source.path,
+                        error=str(exc),
+                    )
+                    continue
+                raise BackupEngineError(
+                    f"Archive source failed: {source.path}: {exc}"
+                ) from exc
+            if entry is not None:
+                planned.append(entry)
+        return planned
 
     async def _write_tape_pass(
         self,
@@ -240,6 +371,7 @@ class BackupEngine:
         files: list[PlannedFile],
         stats: BackupStats,
         *,
+        kind: Literal["full", "incremental"] = "full",
         cancel_check: CancelCheckCallback | None,
         wait_for_media: MediaWaitCallback | None,
     ) -> int:
@@ -249,6 +381,8 @@ class BackupEngine:
             definition: Job definition.
             files: Files still to write (consumed in order).
             stats: Progress accumulator.
+            kind: Session kind (full | incremental), kept across
+                continuation passes after a tape-full split.
             cancel_check: Cooperative cancel check.
             wait_for_media: Callback awaiting new tape insertion.
 
@@ -275,7 +409,9 @@ class BackupEngine:
             await erase_tape_short(self._transport)
             self._catalog.mark_tape_erased(tape_row.id)
 
-        session = self._catalog.create_session(tape_row.id, job_name=definition.name)
+        session = self._catalog.create_session(
+            tape_row.id, job_name=definition.name, kind=kind
+        )
         stats.session_id = new_session_id()
 
         if definition.options.mode != "overwrite":
@@ -287,6 +423,7 @@ class BackupEngine:
             job_name=definition.name,
             tape_label=tape_row.label,
             started_at=datetime.now(UTC),
+            kind=kind,
             files=[
                 HeaderFileEntry(
                     seq=seq,
@@ -295,6 +432,9 @@ class BackupEngine:
                     mtime=file.mtime,
                     sha256=file.sha256,
                     tape_file_index=session.file_base + seq + 1,
+                    kind=file.kind,
+                    inner_count=file.inner_count,
+                    manifest_sha=file.manifest_sha,
                 )
                 for seq, file in enumerate(files)
             ],
@@ -320,13 +460,18 @@ class BackupEngine:
                 self._catalog.finish_session(session.id, status="failed")
                 raise JobCancelled(f"cancelled before {file.path}")
 
+            # Archive entries write their staged zip; the catalog and
+            # header keep the source-root identity (file.path).
+            write_path = file.staging_path or file.path
             stats.current_file = file.path
             stats.current_file_started = time.monotonic()
             await self.publish(stats)
             ticker = self._start_ticker(stats)
             filemark_failure: str | None = None
             try:
-                result = await self._transport.run(["write", "-raw", "-s", file.path])
+                result = await self._transport.run(
+                    ["write", "-raw", "-s", write_path]
+                )
                 if result.exit_code == 0:
                     # Delimit the tape file immediately: without a trailing
                     # filemark the header/files merge into one giant tape
@@ -357,6 +502,9 @@ class BackupEngine:
                         mtime=catalog_mtime,
                         sha256=file.sha256,
                         status="skipped",
+                        kind=file.kind,
+                        inner_count=file.inner_count,
+                        manifest_sha=file.manifest_sha,
                     )
                     self._catalog.finish_session(session.id, status="partial")
                     if wait_for_media is None:
@@ -371,6 +519,9 @@ class BackupEngine:
                     mtime=catalog_mtime,
                     sha256=file.sha256,
                     status="damaged",
+                    kind=file.kind,
+                    inner_count=file.inner_count,
+                    manifest_sha=file.manifest_sha,
                 )
                 if definition.options.continue_on_error:
                     logger.warning("backup_file_damaged", path=file.path, output=stdout)
@@ -387,6 +538,9 @@ class BackupEngine:
                 mtime=catalog_mtime,
                 sha256=file.sha256,
                 status="ok",
+                kind=file.kind,
+                inner_count=file.inner_count,
+                manifest_sha=file.manifest_sha,
             )
             files_processed += 1
             stats.files_done += 1
@@ -425,6 +579,12 @@ class BackupEngine:
     ) -> int:
         """Re-read written files and compare sha256 against the plan.
 
+        Single sequential pass: one rewind+fsf positions the head at the
+        session's first file, then every ok file is read in tape order
+        (each read leaves the head at the next file) — no per-file
+        rewinds. Stops at the first failed read; damaged/skipped entries
+        occupy no tape position and consume no read.
+
         Publishes per-file progress (state stays ``verifying``) so the UI
         shows the phase; every damaged file increments
         ``stats.hash_mismatches``.
@@ -447,6 +607,25 @@ class BackupEngine:
             for entry in self._catalog.list_files(session_id)
         }
         damaged = 0
+        # One sequential pass: position once at the first session file,
+        # then read tape file after tape file (each read leaves the head
+        # after the file just read). A write that failed never wrote its
+        # filemark, so damaged/skipped entries occupy no tape position
+        # and are skipped without consuming a read. The tape file after
+        # a damaged one may carry the failed write's partial data prefix
+        # — the hash then flags it damaged, which is physically true.
+        await self._transport.run(["rewind"])
+        if files:
+            first_index = file_base + 1
+            fsf_result = await self._transport.run(["fsf", str(first_index)])
+            if fsf_result.exit_code != 0:
+                logger.warning(
+                    "verify_position_failed",
+                    tape_index=first_index,
+                    output=fsf_result.stdout.strip(),
+                )
+                await self._transport.run(["rewind"])
+                return 0
         for offset, file in enumerate(files):
             tape_index = file_base + offset + 1
             entry = entries.get(tape_index)
@@ -457,18 +636,21 @@ class BackupEngine:
             stats.current_file = file.path
             await self.publish(stats)
             dest = self._work_dir / f"verify_{tape_index}.bin"
-            # Absolute positioning: space from BOP over the file's
-            # tape-absolute index. Relative spacing after a previous
-            # read drifts whenever a non-ok file was skipped.
-            await self._transport.run(["rewind"])
-            await self._transport.run(["fsf", str(tape_index)])
             result = await self._transport.run(["read", "-d", str(dest)])
             if result.exit_code != 0:
+                dest.unlink(missing_ok=True)
                 self._catalog.mark_file_status(entry.id, "damaged")
                 stats.hash_mismatches += 1
                 damaged += 1
-                logger.warning("verify_read_failed", path=file.path)
-                continue
+                logger.warning(
+                    "verify_read_failed",
+                    path=file.path,
+                    tape_index=tape_index,
+                    output=result.stdout.strip(),
+                )
+                # The head position is no longer trustworthy: stop the
+                # pass instead of comparing the wrong tape files.
+                break
             actual = await asyncio.to_thread(sha256_of, dest)
             dest.unlink(missing_ok=True)
             if actual != file.sha256:

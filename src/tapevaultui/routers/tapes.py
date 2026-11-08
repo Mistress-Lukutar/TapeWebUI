@@ -53,6 +53,7 @@ class SessionOut(BaseModel):
     started_at: str
     finished_at: str | None
     status: str
+    kind: str
     files_count: int
     bytes_total: int
 
@@ -125,6 +126,7 @@ async def get_tape(tape_id: int, catalog: CatalogDep) -> dict[str, object]:
             if session.finished_at
             else None,
             status=session.status,
+            kind=session.kind,
             files_count=session.files_count,
             bytes_total=session.bytes_total,
         )
@@ -381,6 +383,7 @@ def _session_out(session: BackupSession) -> SessionOut:
         started_at=session.started_at.isoformat(),
         finished_at=session.finished_at.isoformat() if session.finished_at else None,
         status=session.status,
+        kind=session.kind,
         files_count=session.files_count,
         bytes_total=session.bytes_total,
     )

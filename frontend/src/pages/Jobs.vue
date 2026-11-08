@@ -14,6 +14,7 @@ interface JobRow {
 interface YamlSource {
   path?: unknown
   excludes?: unknown
+  archive?: unknown
 }
 
 const runtime = useRuntimeStore()
@@ -101,6 +102,40 @@ function applyIgnoreRules(): void {
     error.value = err instanceof Error ? err.message : String(err)
   }
 }
+
+function setSourceArchive(value: boolean): void {
+  error.value = ''
+  try {
+    const doc = yamlLoad(editorText.value) as { sources?: YamlSource[] } | null
+    if (!doc || !Array.isArray(doc.sources)) {
+      error.value = 'Job YAML has no sources to attach rules to'
+      return
+    }
+    const source = doc.sources[ignoreSourceIdx.value]
+    if (!source || typeof source !== 'object') {
+      error.value = 'Selected source no longer exists in the YAML'
+      return
+    }
+    if (value) {
+      source.archive = true
+    } else {
+      delete source.archive
+    }
+    editorText.value = yamlDump(doc, { lineWidth: -1, noRefs: true })
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+const archiveChecked = computed<boolean>({
+  get() {
+    const source = parsedSources.value[ignoreSourceIdx.value]
+    return Boolean(source && source.archive)
+  },
+  set(value: boolean) {
+    setSourceArchive(value)
+  },
+})
 
 async function load(): Promise<void> {
   try {
@@ -216,9 +251,18 @@ onMounted(load)
           <div class="row-actions">
             <select v-model.number="ignoreSourceIdx" @change="pickIgnoreSource()">
               <option v-for="(source, idx) in parsedSources" :key="idx" :value="idx">
-                {{ typeof source.path === 'string' ? source.path : `source ${idx + 1}` }}
+                {{ typeof source.path === 'string' ? source.path : `source ${idx + 1}` }}{{ source.archive ? ' [zip]' : '' }}
               </option>
             </select>
+            <label class="archive-toggle" title="Back the whole source up as one zip tape file">
+              <input
+                type="checkbox"
+                :checked="archiveChecked"
+                :disabled="!parsedSources.length"
+                @change="archiveChecked = ($event.target as HTMLInputElement).checked"
+              />
+              archive → one zip tape file
+            </label>
             <span v-if="!parsedSources.length" class="dim">No sources in YAML</span>
           </div>
           <div class="rule-tags">

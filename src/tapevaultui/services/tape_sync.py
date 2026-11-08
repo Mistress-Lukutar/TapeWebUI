@@ -20,12 +20,11 @@ from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
 from tapevaultui.services.session_io import (
     NoMediaError,
     SessionIoError,
-    TapeFormatError,
     identify_tape,
     read_header_at_current_position,
     rewind_tape,
 )
-from tapevaultui.services.tape_format import SessionHeader
+from tapevaultui.services.tape_format import SessionHeader, TapeFormatError
 
 logger = structlog.get_logger(__name__)
 

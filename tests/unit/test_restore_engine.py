@@ -2,8 +2,8 @@
 File:   test_restore_engine.py
 Brief:  Restore engine tests on the fake transport and in-memory catalog.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -434,3 +434,107 @@ def test_target_path_collision_policies(tmp_path: Path) -> None:
     resolved = engine._target_path(original_target, request_original)
     assert resolved is not None
     assert Path(resolved) == Path(original_target)
+
+
+# -- archive entries -------------------------------------------------------
+
+
+async def test_restore_archive_entry_extracts_tree(tmp_path: Path) -> None:
+    """An archive entry is hash-checked, then extracted into the target."""
+    from tapevaultui.services.archive_builder import plan_archive_source
+    from tapevaultui.services.job_defs import SourceDef
+    from tapevaultui.services.snapshot import sha256_of
+    from tapevaultui.services.tape_format import serialize_header
+
+    # Real source tree -> staged zip (as the backup engine would build).
+    src = tmp_path / "src"
+    (src / "nested").mkdir(parents=True)
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "nested" / "b.txt").write_bytes(b"BB")
+    staged = plan_archive_source(
+        SourceDef.model_validate({"path": str(src), "archive": True}),
+        staging_dir=tmp_path / "staging",
+    )
+    assert staged is not None
+    zip_path = Path(staged.staging_path)
+    assert zip_path is not None
+
+    engine, repo = _make_engine(tmp_path, FakeItDtTransport())
+    tape = repo.register_tape("tape-uuid-archive", label="Archive R")
+    session = repo.create_session(tape.id, job_name="archivejob")
+    mtime = datetime.now(UTC)
+    header_entry = repo.add_file(
+        session.id,
+        tape_file_index=0,
+        path="<session-header>",
+        size=10,
+        mtime=mtime,
+        sha256="0" * 64,
+    )
+    assert header_entry is not None
+    archive_entry = repo.add_file(
+        session.id,
+        tape_file_index=1,
+        path=str(src),
+        size=len(zip_path.read_bytes()),
+        mtime=mtime,
+        sha256=sha256_of(zip_path),
+        kind="archive",
+        inner_count=staged.inner_count,
+        manifest_sha=staged.manifest_sha,
+    )
+    assert archive_entry is not None
+
+    tape_header = serialize_header(
+        build_session_header(
+            tape_id="tape-uuid-archive",
+            session_id="s-1",
+            job_name="archivejob",
+            started_at=datetime.now(UTC),
+        )
+    )
+    # Position-aware fake: BOP read sees the header, index 1 the zip.
+    fake = FakeItDtTransport(
+        tape_files=[tape_header, zip_path.read_bytes()]
+    )
+    engine = RestoreEngine(fake, repo, tmp_path / "work", EventBus(), asyncio.Lock())
+
+    request = RestoreRequest(
+        file_ids=[archive_entry.id],
+        destination_mode="alternate",
+        destination_dir=str(tmp_path / "out"),
+        collision="overwrite",
+    )
+    plan = engine.build_plan([archive_entry.id])
+    stats = RestoreStats(1, plan.tapes[0].tape_id)
+    final = await engine.execute(request, stats, plan, asyncio.Event())
+
+    assert final.files_done == 1
+    assert final.hash_mismatches == 0
+    # The tree was recreated under the alternate destination, keeping
+    # the hierarchy below the drive root.
+    restored_root = tmp_path / "out" / Path(*Path(src).parts[1:])
+    assert (restored_root / "a.txt").read_bytes() == b"AAAA"
+    assert (restored_root / "nested" / "b.txt").read_bytes() == b"BB"
+
+
+def test_build_plan_keeps_archive_kind(tmp_path: Path) -> None:
+    """Plan items carry the archive kind and inner count."""
+    engine, repo = _make_engine(tmp_path, FakeItDtTransport())
+    tape = repo.register_tape("tape-uuid-archive2", label="Archive 2")
+    session = repo.create_session(tape.id, job_name="archivejob")
+    entry = repo.add_file(
+        session.id,
+        tape_file_index=1,
+        path="C:/Data/toolset",
+        size=100,
+        mtime=datetime.now(UTC),
+        sha256=_sha("zip-bytes"),
+        kind="archive",
+        inner_count=42,
+    )
+    assert entry is not None
+    plan = engine.build_plan([entry.id])
+    item = plan.tapes[0].items[0]
+    assert item.kind == "archive"
+    assert item.inner_count == 42

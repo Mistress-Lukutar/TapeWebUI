@@ -52,6 +52,7 @@ def test_tapes_list_and_details(client: TestClient) -> None:
     body = response.json()
     assert body["label"] == "API Tape"
     assert len(body["sessions"]) == 1
+    assert body["sessions"][0]["kind"] == "full"
 
     assert client.get("/api/tapes/9999").status_code == 404
 

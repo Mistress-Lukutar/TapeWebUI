@@ -138,3 +138,51 @@ def test_excludes_backslash_rejected(tmp_path: Path) -> None:
         store.parse_yaml(
             'name: x\nsources:\n  - path: D:/x\n    excludes: ["temp\\\\"]\n'
         )
+
+
+def test_backup_type_options_parse(tmp_path: Path) -> None:
+    """backup_type and full_every_days parse and roundtrip."""
+    store = JobDefStore(tmp_path)
+    definition = store.parse_yaml(
+        "name: x\nsources:\n  - path: D:/x\n"
+        "options:\n  backup_type: incremental\n  full_every_days: 14\n"
+    )
+    assert definition.options.backup_type == "incremental"
+    assert definition.options.full_every_days == 14
+
+    store.save(definition)
+    loaded = store.load("x")
+    assert loaded.options == definition.options
+
+
+def test_backup_type_defaults_full() -> None:
+    """Jobs without backup_type stay full-run jobs."""
+    from tapevaultui.services.job_defs import JobOptions
+
+    assert JobOptions().backup_type == "full"
+    assert JobOptions().full_every_days == 30
+
+
+def test_backup_type_invalid_value_rejected(tmp_path: Path) -> None:
+    """An unknown backup_type is a validation error."""
+    store = JobDefStore(tmp_path)
+    with pytest.raises(JobDefsError, match="backup_type"):
+        store.parse_yaml(
+            "name: x\nsources:\n  - path: D:/x\n"
+            "options:\n  backup_type: differential\n"
+        )
+
+
+def test_source_archive_flag_roundtrip(tmp_path: Path) -> None:
+    """The per-source archive flag parses, defaults off, and saves."""
+    store = JobDefStore(tmp_path)
+    definition = store.parse_yaml(
+        "name: x\nsources:\n  - path: D:/x\n  - path: D:/y\n"
+        "    archive: true\n"
+        "options:\n  mode: append\n"
+    )
+    assert [s.archive for s in definition.sources] == [False, True]
+
+    store.save(definition)
+    loaded = store.load("x")
+    assert [s.archive for s in loaded.sources] == [False, True]

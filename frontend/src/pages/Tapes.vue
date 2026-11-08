@@ -19,6 +19,7 @@ interface Session {
   job_name: string
   started_at: string
   status: string
+  kind: string
   files_count: number
   bytes_total: number
 }
@@ -358,13 +359,14 @@ onMounted(() => {
     <h3>{{ details.label || details.uuid.slice(0, 8) }} — sessions</h3>
     <table class="table">
       <thead>
-        <tr><th>#</th><th>Job</th><th>Started</th><th>Files</th><th>Bytes</th><th>Status</th></tr>
+        <tr><th>#</th><th>Job</th><th>Started</th><th>Kind</th><th>Files</th><th>Bytes</th><th>Status</th></tr>
       </thead>
       <tbody>
         <tr v-for="session in details.sessions" :key="session.id">
           <td>{{ session.tape_seq }}</td>
           <td>{{ session.job_name }}</td>
           <td>{{ formatIso(session.started_at) }}</td>
+          <td>{{ session.kind }}</td>
           <td>{{ session.files_count }}</td>
           <td>{{ formatBytes(session.bytes_total) }}</td>
           <td>{{ session.status }}</td>

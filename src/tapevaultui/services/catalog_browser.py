@@ -3,8 +3,8 @@ File:   catalog_browser.py
 Brief:  Catalog explorer: path-prefix grouping of FileEntry rows into
         directory listings and subtree selections (no tape reads).
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ class SessionFileRow(BaseModel):
     sha256: str
     status: str
     tape_file_index: int
+    kind: str = "file"
+    inner_count: int = 0
 
 
 class FileVersionRow(BaseModel):
@@ -54,6 +56,8 @@ class FileVersionRow(BaseModel):
     sha256: str
     status: str
     tape_file_index: int
+    kind: str = "file"
+    inner_count: int = 0
 
 
 class MergedFileRow(BaseModel):
@@ -151,6 +155,8 @@ def tape_listing(
                         sha256=entry.sha256,
                         status=entry.status,
                         tape_file_index=entry.tape_file_index,
+                        kind=entry.kind,
+                        inner_count=entry.inner_count,
                     )
                     for entry, session in ordered
                 ],
@@ -377,6 +383,8 @@ def _file_row(entry: FileEntry) -> SessionFileRow:
         sha256=entry.sha256,
         status=entry.status,
         tape_file_index=entry.tape_file_index,
+        kind=entry.kind,
+        inner_count=entry.inner_count,
     )
 
 

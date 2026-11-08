@@ -88,3 +88,61 @@ def test_started_at_is_iso_string() -> None:
     """started_at serializes to an ISO-8601 string."""
     raw = serialize_header(_sample_header()).decode()
     assert '"started_at": "2026-11-06T12:00:00+00:00"' in raw
+
+
+def test_archive_entry_fields_roundtrip() -> None:
+    """Archive entry fields serialize and parse losslessly."""
+    header = build_session_header(
+        tape_id="t",
+        session_id="s",
+        started_at=datetime(2026, 11, 8, tzinfo=UTC),
+        files=[
+            HeaderFileEntry(
+                seq=0,
+                path="C:/Data/toolset",
+                size=123,
+                mtime=1.0,
+                sha256="a" * 64,
+                tape_file_index=1,
+                kind="archive",
+                inner_count=42,
+                manifest_sha="b" * 64,
+            )
+        ],
+    )
+    parsed = parse_header(serialize_header(header))
+    assert parsed is not None
+    entry = parsed.files[0]
+    assert entry.kind == "archive"
+    assert entry.inner_count == 42
+    assert entry.manifest_sha == "b" * 64
+
+
+def test_plain_entries_default_to_file_kind() -> None:
+    """Entries without archive fields parse as plain files (v1 compat)."""
+    import json
+
+    raw = json.dumps(
+        {
+            "format_version": 1,
+            "app_version": "0.7.0",
+            "tape_id": "t",
+            "session_id": "s",
+            "started_at": "2026-11-01T00:00:00+00:00",
+            "files": [
+                {
+                    "seq": 0,
+                    "path": "C:/a.txt",
+                    "size": 1,
+                    "mtime": 0.0,
+                    "sha256": "c" * 64,
+                    "tape_file_index": 1,
+                }
+            ],
+        }
+    ).encode()
+    parsed = parse_header(raw)
+    assert parsed is not None
+    assert parsed.files[0].kind == "file"
+    assert parsed.files[0].inner_count == 0
+    assert parsed.files[0].manifest_sha == ""

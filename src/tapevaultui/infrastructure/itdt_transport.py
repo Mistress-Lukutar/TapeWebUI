@@ -344,9 +344,11 @@ class FakeItDtTransport:
             stdout, exit_code = self.command_scenarios[key]
         else:
             stdout, exit_code = self.scenarios.get(args[0], self.default_response)
+        simulation_wrote_dest = False
         if self.tape_files is not None:
             stdout, exit_code = self._run_tape_simulation(args)
-        if args[0] == "read" and "-d" in args:
+            simulation_wrote_dest = args[0] == "read" and exit_code == 0
+        if args[0] == "read" and "-d" in args and not simulation_wrote_dest:
             destination = Path(args[args.index("-d") + 1])
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(stdout.encode("utf-8"))
@@ -374,13 +376,26 @@ class FakeItDtTransport:
             self.position += int(args[1])
             return ("Spacing forward...", 0)
         if args[0] == "erase":
+            assert self.tape_files is not None  # simulation mode
             self.tape_files.clear()
             self.position = 0
             return ("Erasing tape...", 0)
         if args[0] == "read":
+            assert self.tape_files is not None  # simulation mode
             if self.position >= len(self.tape_files):
                 return ("End of data reached", 1)
-            return (self.tape_files[self.position].decode("utf-8"), 0)
+            # A successful read leaves the head after the file just read
+            # (real ITDT semantics), so consecutive reads walk the tape.
+            self.position += 1
+            data = self.tape_files[self.position - 1]
+            if "-d" in args:
+                destination = Path(args[args.index("-d") + 1])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+            try:
+                return (data.decode("utf-8"), 0)
+            except UnicodeDecodeError:
+                return (f"<binary {len(data)} bytes>", 0)
         return self.scenarios.get(args[0], self.default_response)
 
     async def stream(self, args: list[str]) -> AsyncIterator[str]:

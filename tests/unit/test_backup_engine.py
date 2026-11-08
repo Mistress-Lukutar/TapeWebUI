@@ -2,14 +2,14 @@
 File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
@@ -33,6 +33,8 @@ def _definition(
     verify: str = "readback",
     continue_on_error: bool = True,
     mode: str = "append",
+    backup_type: str = "full",
+    full_every_days: int = 30,
 ) -> JobDefinition:
     """Build a one-source job over the test tree.
 
@@ -41,6 +43,8 @@ def _definition(
         verify: Verify option value.
         continue_on_error: continue_on_error option value.
         mode: Backup mode (append | overwrite).
+        backup_type: full | incremental.
+        full_every_days: Force-full period for incremental jobs.
 
     Returns:
         A JobDefinition.
@@ -53,6 +57,8 @@ def _definition(
                 "mode": mode,
                 "verify": verify,
                 "continue_on_error": continue_on_error,
+                "backup_type": backup_type,
+                "full_every_days": full_every_days,
             },
         }
     )
@@ -213,6 +219,29 @@ async def test_verify_readback_ok_when_content_matches(tmp_path: Path) -> None:
     assert files[1].status == "ok"
 
 
+async def test_verify_is_one_sequential_pass(tmp_path: Path) -> None:
+    """Verify positions once, then reads file after file without rewinds."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BB")
+    (src / "c.txt").write_bytes(b"CC")
+
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, _make_repo(), tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    verify_started = fake.commands.index(("weof", "1")) + 1
+    # The write phase ends with the last weof; verify follows.
+    verify_commands = fake.commands[verify_started:]
+    rewinds = [cmd for cmd in verify_commands if cmd[0] == "rewind"]
+    fsfs = [cmd for cmd in verify_commands if cmd[0] == "fsf"]
+    reads = [cmd for cmd in verify_commands if cmd[0] == "read"]
+    assert len(rewinds) == 2  # enter + leave the pass
+    assert fsfs == [("fsf", "1")]  # first session file, once
+    assert len(reads) == 3  # one per written file, in tape order
+
+
 async def test_write_error_continue_on_error(tmp_path: Path) -> None:
     """A failed write marks the file damaged and continues."""
     src = tmp_path / "src"
@@ -336,3 +365,357 @@ def test_hash_helper_matches_snapshot(tmp_path: Path) -> None:
     file = tmp_path / "x.bin"
     file.write_bytes(b"same")
     assert sha256_of(file) == hashlib.sha256(b"same").hexdigest()
+
+
+async def test_incremental_first_run_is_full(tmp_path: Path) -> None:
+    """The first run of an incremental job records a full session."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+
+    sessions = repo.list_sessions(repo.list_tapes()[0].id)
+    assert len(sessions) == 1
+    assert sessions[0].kind == "full"
+
+
+async def test_incremental_second_run_unchanged_skips_tape(tmp_path: Path) -> None:
+    """With no changes the incremental run writes nothing at all."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    fake = FakeItDtTransport()
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+
+    stats = await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+    assert stats.files_total == 0
+    tape_ids = [t.id for t in repo.list_tapes()]
+    total_sessions = sum(len(repo.list_sessions(t)) for t in tape_ids)
+    assert total_sessions == 1  # only the first (full) session exists
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    assert len(writes) == 2  # header + one file from the first run only
+
+
+async def test_incremental_writes_only_changed_files(tmp_path: Path) -> None:
+    """A changed file is re-written as a new incremental session."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BBBB")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+
+    # Change one file's content (mtime changes with it).
+    (src / "b.txt").write_bytes(b"CHANGED")
+    # Run 2 on a fake whose BOP read returns the existing tape's header,
+    # so the engine matches tape 1 instead of registering a new one.
+    tape_uuid = repo.list_tapes()[0].uuid
+    fake2 = FakeItDtTransport(
+        tape_files=[
+            serialize_header(
+                build_session_header(
+                    tape_id=tape_uuid,
+                    session_id=new_session_id(),
+                    started_at=datetime.now(UTC),
+                )
+            )
+        ]
+    )
+    engine2 = BackupEngine(fake2, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine2.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"), stats
+    )
+
+    tape = repo.list_tapes()[0]
+    sessions = repo.list_sessions(tape.id)
+    assert len(sessions) == 2
+    assert sessions[1].kind == "incremental"
+    files = repo.list_files(sessions[1].id)
+    names = [f.path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] for f in files]
+    assert names == ["<session-header>", "b.txt"]
+    assert stats.files_total == 1
+
+
+async def test_incremental_forces_full_after_interval(tmp_path: Path) -> None:
+    """A stale full session forces the next run back to full."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+
+    # Backdate the full session beyond full_every_days.
+    tape = repo.list_tapes()[0]
+    session = repo.list_sessions(tape.id)[0]
+    stale = datetime.now(UTC) - timedelta(days=31)
+    with repo._session_factory() as db:
+        row = db.get(type(session), session.id)
+        assert row is not None
+        row.started_at = stale
+        db.commit()
+
+    tape_uuid = tape.uuid
+    fake2 = FakeItDtTransport(
+        tape_files=[
+            serialize_header(
+                build_session_header(
+                    tape_id=tape_uuid,
+                    session_id=new_session_id(),
+                    started_at=datetime.now(UTC),
+                )
+            )
+        ]
+    )
+    engine2 = BackupEngine(fake2, repo, tmp_path / "work", EventBus())
+    await engine2.execute(
+        _definition(
+            tmp_path, backup_type="incremental", verify="none", full_every_days=30
+        ),
+        BackupStats("testjob"),
+    )
+    sessions = repo.list_sessions(tape.id)
+    assert len(sessions) == 2
+    assert sessions[1].kind == "full"
+
+
+async def test_incremental_overwrite_mode_is_full(tmp_path: Path) -> None:
+    """Overwrite mode always records a full session."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", mode="overwrite"),
+        BackupStats("testjob"),
+    )
+    sessions = repo.list_sessions(repo.list_tapes()[0].id)
+    assert sessions[0].kind == "full"
+
+
+async def test_incremental_baseline_ignores_erased_sessions(tmp_path: Path) -> None:
+    """After the baseline tape is erased the next run is a full."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _definition(tmp_path, backup_type="incremental", verify="none"),
+        BackupStats("testjob"),
+    )
+
+    tape = repo.list_tapes()[0]
+    repo.mark_tape_erased(tape.id)
+    fake = FakeItDtTransport()
+    engine2 = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine2.execute(
+        _definition(
+            tmp_path,
+            backup_type="incremental",
+            verify="none",
+            mode="overwrite",
+        ),
+        stats,
+    )
+    assert stats.files_total == 1  # file re-planned despite unchanged mtime
+
+
+# -- archive sources -------------------------------------------------------
+
+
+def _archive_definition(
+    tmp_path: Path,
+    *,
+    backup_type: str = "full",
+    verify: str = "none",
+    extra_plain: bool = False,
+) -> JobDefinition:
+    """Build a job with one archive source (+ optional plain source).
+
+    Args:
+        tmp_path: Pytest temp dir holding the source tree.
+        backup_type: full | incremental.
+        verify: Verify option value.
+        extra_plain: Add a second plain (non-archive) source.
+
+    Returns:
+        A JobDefinition.
+    """
+    sources: list[dict[str, object]] = [
+        {"path": str(tmp_path / "src"), "archive": True}
+    ]
+    if extra_plain:
+        sources.append({"path": str(tmp_path / "plain")})
+    return JobDefinition.model_validate(
+        {
+            "name": "testjob",
+            "sources": sources,
+            "options": {
+                "mode": "append",
+                "verify": verify,
+                "continue_on_error": True,
+                "backup_type": backup_type,
+                "full_every_days": 30,
+            },
+        }
+    )
+
+
+async def test_archive_source_writes_one_tape_file(tmp_path: Path) -> None:
+    """An archive source lands on tape as one file, cataloged by source root."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "b.txt").write_bytes(b"BB")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(_archive_definition(tmp_path), stats)
+
+    assert stats.files_total == 1  # the zip, not the two inner files
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    assert len(writes) == 2  # header + one archive tape file
+    assert "header_" in writes[0][3]
+    staged = writes[1][3]
+    assert staged != str(src)  # the staged zip, not the source root
+    assert staged.endswith(".zip")
+
+    session = repo.list_sessions(repo.list_tapes()[0].id)[0]
+    files = repo.list_files(session.id)
+    entry = files[1]
+    assert entry.path == str(src)  # source-root identity in the catalog
+    assert entry.kind == "archive"
+    assert entry.inner_count == 2
+    assert entry.manifest_sha
+    assert entry.sha256  # zip digest
+
+    # The BOP header read (tape identification) happened.
+    assert any(cmd[0] == "read" for cmd in fake.commands)
+
+
+async def test_archive_incremental_unchanged_skips_tape(tmp_path: Path) -> None:
+    """An incremental run skips an archive whose content did not change."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _archive_definition(tmp_path, backup_type="incremental"),
+        BackupStats("testjob"),
+    )
+    assert len(repo.list_sessions(repo.list_tapes()[0].id)) == 1
+
+    stats = BackupStats("testjob")
+    await engine.execute(
+        _archive_definition(tmp_path, backup_type="incremental"),
+        stats,
+    )
+    assert stats.files_total == 0
+    assert len(repo.list_sessions(repo.list_tapes()[0].id)) == 1
+
+
+async def test_archive_incremental_changed_rewrites(tmp_path: Path) -> None:
+    """Changed archive content is rebuilt and written as a new session."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    engine = BackupEngine(FakeItDtTransport(), repo, tmp_path / "work", EventBus())
+    await engine.execute(
+        _archive_definition(tmp_path, backup_type="incremental"),
+        BackupStats("testjob"),
+    )
+
+    (src / "a.txt").write_bytes(b"CHANGED")
+    # Run 2 on a fake whose BOP read returns the existing tape's header,
+    # so the engine matches tape 1 instead of registering a new one.
+    tape_uuid = repo.list_tapes()[0].uuid
+    fake2 = FakeItDtTransport(
+        tape_files=[
+            serialize_header(
+                build_session_header(
+                    tape_id=tape_uuid,
+                    session_id=new_session_id(),
+                    started_at=datetime.now(UTC),
+                )
+            )
+        ]
+    )
+    engine2 = BackupEngine(fake2, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine2.execute(
+        _archive_definition(tmp_path, backup_type="incremental"),
+        stats,
+    )
+    tape = repo.list_tapes()[0]
+    sessions = repo.list_sessions(tape.id)
+    assert len(sessions) == 2
+    written = repo.list_files(sessions[1].id)
+    assert written[1].kind == "archive"
+    assert written[1].manifest_sha
+
+    versions = repo.latest_archive_versions("testjob")
+    assert str(src) in versions
+    assert versions[str(src)][1] == written[1].manifest_sha
+
+
+async def test_mixed_sources_write_plain_and_archive(tmp_path: Path) -> None:
+    """Plain sources write per-file; archive sources one zip; both cataloged."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "p.txt").write_bytes(b"P")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(_archive_definition(tmp_path, extra_plain=True), stats)
+
+    assert stats.files_total == 2  # 1 plain file + 1 archive zip
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    assert len(writes) == 3  # header + plain file + archive zip
+    session = repo.list_sessions(repo.list_tapes()[0].id)[0]
+    files = repo.list_files(session.id)
+    kinds = {entry.path: entry.kind for entry in files}
+    assert kinds[str(plain / "p.txt")] == "file"
+    assert kinds[str(src)] == "archive"

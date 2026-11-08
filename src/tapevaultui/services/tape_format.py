@@ -2,8 +2,8 @@
 File:   tape_format.py
 Brief:  Tape format protocol: session header (t0) serialization/parsing.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from tapevaultui import __version__
 
-# Bump when the on-tape protocol changes in an incompatible way.
-FORMAT_VERSION = 1
+# v2: per-entry archive fields (kind, inner_count, manifest_sha) — a
+# pre-v2 reader refuses these tapes instead of restoring archive entries
+# as plain files. v1 tapes remain readable.
+FORMAT_VERSION = 2
 
 
 class HeaderFileEntry(BaseModel):
@@ -29,6 +31,17 @@ class HeaderFileEntry(BaseModel):
     mtime: float = Field(description="Source modification time (unix seconds)")
     sha256: str = Field(description="Hex sha256 of the file content")
     tape_file_index: int = Field(ge=0, description="Tape file index (tN)")
+    kind: str = Field(
+        default="file",
+        description="Entry kind: file | archive (one staged zip)",
+    )
+    inner_count: int = Field(
+        default=0, ge=0, description="Files inside the archive (archives only)"
+    )
+    manifest_sha: str = Field(
+        default="",
+        description="Archive content manifest hash (archives only)",
+    )
 
 
 class SessionHeader(BaseModel):
@@ -41,6 +54,7 @@ class SessionHeader(BaseModel):
     session_id: str = Field(description="Session UUID")
     job_name: str = Field(default="", description="Job name snapshot")
     started_at: str = Field(description="Session start (ISO-8601 UTC)")
+    kind: str = Field(default="full", description="Session kind: full | incremental")
     files: list[HeaderFileEntry] = Field(default_factory=list)
 
     @field_validator("format_version")
@@ -76,6 +90,7 @@ def build_session_header(
     job_name: str = "",
     tape_label: str = "",
     started_at: datetime,
+    kind: str = "full",
     files: list[HeaderFileEntry] | None = None,
 ) -> SessionHeader:
     """Build a session header with current format and app versions.
@@ -86,6 +101,7 @@ def build_session_header(
         job_name: Job name snapshot.
         tape_label: Human-readable tape label.
         started_at: Session start time (UTC).
+        kind: Session kind: full | incremental.
         files: Source file entries.
 
     Returns:
@@ -99,6 +115,7 @@ def build_session_header(
         session_id=session_id,
         job_name=job_name,
         started_at=started_at.isoformat(),
+        kind=kind,
         files=files or [],
     )
 

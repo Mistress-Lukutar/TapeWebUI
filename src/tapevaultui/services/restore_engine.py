@@ -2,8 +2,8 @@
 File:   restore_engine.py
 Brief:  Restore engine: plan, single-pass tape read, hash-checked write-out.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtTransport,
 )
+from tapevaultui.services.archive_builder import ArchiveError, extract_archive
 from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.session_io import (
@@ -54,6 +55,8 @@ class RestoreItem(BaseModel):
     path: str
     size: int
     sha256: str
+    kind: str = "file"
+    inner_count: int = 0
 
 
 class PlanSelection(BaseModel):
@@ -349,6 +352,8 @@ class RestoreEngine:
                 path=entry.path,
                 size=entry.size,
                 sha256=entry.sha256,
+                kind=entry.kind,
+                inner_count=entry.inner_count,
             )
             bucket = groups.get(entry_tape.id)
             if bucket is None:
@@ -559,15 +564,80 @@ class RestoreEngine:
                 stats.hash_mismatches += 1
                 logger.warning("restore_hash_mismatch", path=item.path)
                 return
-            target = self._target_path(item.path, request)
-            if target is None:
-                return  # collision policy: skip
-            await asyncio.to_thread(shutil.copyfile, dest, target)
+            if item.kind == "archive":
+                # One tape file covering a whole source tree: extract it
+                # into the target directory instead of copying the zip.
+                target = self._archive_target_dir(item.path, request)
+                if target is None:
+                    return  # collision policy: skip
+                try:
+                    extracted = await asyncio.to_thread(
+                        extract_archive, dest, target
+                    )
+                except ArchiveError as exc:
+                    logger.warning(
+                        "restore_archive_failed", path=item.path, error=str(exc)
+                    )
+                    return
+                logger.info(
+                    "restore_archive_extracted",
+                    path=item.path,
+                    target=str(target),
+                    files=extracted,
+                )
+            else:
+                target = self._target_path(item.path, request)
+                if target is None:
+                    return  # collision policy: skip
+                await asyncio.to_thread(shutil.copyfile, dest, target)
         finally:
             dest.unlink(missing_ok=True)
 
         stats.files_done += 1
         stats.bytes_done += item.size
+
+    def _archive_target_dir(
+        self, original_path: str, request: RestoreRequest
+    ) -> Path | None:
+        """Resolve the extraction directory for an archive entry.
+
+        The archive's ``path`` is the backed-up source root, so the
+        extraction target is that directory (original mode) or the same
+        relative location below the alternate destination. Collision
+        policies operate on the directory: skip leaves an existing
+        target untouched, rename picks ``<name>(n)``.
+
+        Args:
+            original_path: The source root path recorded in the catalog.
+            request: Destination and collision options.
+
+        Returns:
+            The extraction directory, or None when the collision policy
+            says skip.
+
+        Raises:
+            RestoreEngineError: When no free renamed directory can be
+                found.
+        """
+        original = Path(original_path)
+        if request.destination_mode == "original" or not request.destination_dir:
+            target = original
+        else:
+            relative = (
+                Path(*original.parts[1:]) if len(original.parts) > 1 else original
+            )
+            target = Path(request.destination_dir) / relative
+
+        if not target.exists() or request.collision == "overwrite":
+            return target
+        if request.collision == "skip":
+            logger.info("restore_collision_skipped", path=str(target))
+            return None
+        for counter in range(1, 1000):
+            candidate = target.with_name(f"{target.name}({counter})")
+            if not candidate.exists():
+                return candidate
+        raise RestoreEngineError(f"Cannot find free name for {target}")
 
     def _target_path(self, original_path: str, request: RestoreRequest) -> Path | None:
         """Resolve the output path for a restored file.

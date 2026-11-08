@@ -2,14 +2,15 @@
 File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeAlias
 
 import structlog
 from sqlalchemy import create_engine, func, select
@@ -29,6 +30,11 @@ logger = structlog.get_logger(__name__)
 
 # Path of the t0 session header pseudo-entry in the files table.
 SESSION_HEADER_PATH = "<session-header>"
+
+# Latest-version ranking for a job: (session start, session id, file id)
+# -> (sha256, size, mtime).
+_JobVersionRank: TypeAlias = tuple[datetime, int, int]
+_JobVersion: TypeAlias = tuple[str, int, datetime]
 # Upper bound for path prefix range scans: every valid UTF-8 string that
 # extends ``prefix`` sorts strictly below ``prefix + _PREFIX_SENTINEL``
 # and at or above ``prefix``, so the (session_id, path) index can be
@@ -256,6 +262,7 @@ class CatalogRepository:
         job_name: str = "",
         started_at: datetime | None = None,
         format_version: int = 1,
+        kind: str = "full",
     ) -> BackupSession:
         """Create a new write session record.
 
@@ -265,6 +272,7 @@ class CatalogRepository:
             job_name: Job name snapshot.
             started_at: Session start (defaults to now UTC).
             format_version: Tape format version.
+            kind: Session kind: full | incremental.
 
         Returns:
             The created BackupSession row.
@@ -280,6 +288,7 @@ class CatalogRepository:
                 started_at=started_at or _now(),
                 format_version=format_version,
                 file_base=file_base,
+                kind=kind,
             )
             session.add(record)
             session.commit()
@@ -358,6 +367,9 @@ class CatalogRepository:
         mtime: datetime,
         sha256: str,
         status: str = "ok",
+        kind: str = "file",
+        inner_count: int = 0,
+        manifest_sha: str = "",
     ) -> FileEntry:
         """Register a file within a session.
 
@@ -365,20 +377,26 @@ class CatalogRepository:
             session_id: BackupSession primary key.
             tape_file_index: Tape-absolute file position (fsf steps from
                 BOP; the session header sits at ``sessions.file_base``).
-            path: Source file path.
-            size: File size in bytes.
+            path: Source file path (archive entry: the source root).
+            size: File size in bytes (archive entry: zip size).
             mtime: Source modification time.
-            sha256: Hex digest of the file content.
+            sha256: Hex digest of the content (archive entry: the staged
+                zip's digest).
             status: ok | damaged | skipped.
+            kind: file | archive.
+            inner_count: Files inside the archive (archives only).
+            manifest_sha: Archive content manifest hash (archives only).
 
         Returns:
             The created FileEntry row.
 
         Raises:
-            ValueError: If the status value is not allowed.
+            ValueError: If the status or kind value is not allowed.
         """
         if status not in ("ok", "damaged", "skipped"):
             raise ValueError(f"Invalid file status: {status!r}")
+        if kind not in ("file", "archive"):
+            raise ValueError(f"Invalid file kind: {kind!r}")
         with self._session_factory() as session:
             entry = FileEntry(
                 session_id=session_id,
@@ -388,6 +406,9 @@ class CatalogRepository:
                 mtime=mtime,
                 sha256=sha256,
                 status=status,
+                kind=kind,
+                inner_count=inner_count,
+                manifest_sha=manifest_sha,
             )
             session.add(entry)
             session.commit()
@@ -526,6 +547,102 @@ class CatalogRepository:
             ):
                 latest[entry.path] = (entry, record)
         return [entry.id for entry, _ in latest.values()]
+
+    def latest_job_file_versions(
+        self, job_name: str
+    ) -> dict[str, tuple[str, int, datetime]]:
+        """Latest backed-up version of each path across a job's sessions.
+
+        Versions are ranked by session start time (then session id, then
+        file id) over all non-erased sessions of the job on any tape;
+        only files written with status ok count.
+
+        Args:
+            job_name: Job name snapshot stored on sessions.
+
+        Returns:
+            Mapping path -> (sha256, size, mtime) of the newest version.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FileEntry, BackupSession)
+                .join(BackupSession, FileEntry.session_id == BackupSession.id)
+                .where(
+                    BackupSession.job_name == job_name,
+                    BackupSession.status != "erased",
+                    FileEntry.status == "ok",
+                    FileEntry.path != SESSION_HEADER_PATH,
+                )
+            )
+            # (rank, version) per path; rank = (started_at, session id, file id)
+            latest: dict[str, tuple[_JobVersionRank, _JobVersion]] = {}
+            for entry, record in rows.all():
+                rank = (record.started_at, record.id, entry.id)
+                version = (entry.sha256, entry.size, entry.mtime)
+                best = latest.get(entry.path)
+                if best is None or rank > best[0]:
+                    latest[entry.path] = (rank, version)
+            return {path: value for path, (_, value) in latest.items()}
+
+    def latest_archive_versions(
+        self, job_name: str
+    ) -> dict[str, tuple[str, str]]:
+        """Newest backed-up archive entry per source path, for skip checks.
+
+        Like ``latest_job_file_versions`` but restricted to
+        ``kind == "archive"`` entries; ranked the same way over all
+        non-erased sessions of the job on any tape, ok status only.
+
+        Args:
+            job_name: Job name snapshot stored on sessions.
+
+        Returns:
+            Mapping source-root path -> (zip sha256, manifest_sha) of
+            the newest written archive version.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FileEntry, BackupSession)
+                .join(BackupSession, FileEntry.session_id == BackupSession.id)
+                .where(
+                    BackupSession.job_name == job_name,
+                    BackupSession.status != "erased",
+                    FileEntry.status == "ok",
+                    FileEntry.path != SESSION_HEADER_PATH,
+                    FileEntry.kind == "archive",
+                )
+            )
+            latest: dict[str, tuple[_JobVersionRank, str, str]] = {}
+            for entry, record in rows.all():
+                rank = (record.started_at, record.id, entry.id)
+                best = latest.get(entry.path)
+                if best is None or rank > best[0]:
+                    latest[entry.path] = (rank, entry.sha256, entry.manifest_sha)
+            return {
+                path: (sha, manifest) for path, (_, sha, manifest) in latest.items()
+            }
+
+    def latest_full_session(self, job_name: str) -> BackupSession | None:
+        """Newest live full session of a job, on any tape.
+
+        Args:
+            job_name: Job name snapshot stored on sessions.
+
+        Returns:
+            The BackupSession row, or None when the job has no non-erased
+            full session yet.
+        """
+        with self._session_factory() as session:
+            return session.scalars(
+                select(BackupSession)
+                .where(
+                    BackupSession.job_name == job_name,
+                    BackupSession.kind == "full",
+                    BackupSession.status != "erased",
+                )
+                .order_by(BackupSession.started_at.desc())
+                .limit(1)
+            ).first()
 
     # -- jobs and runs -----------------------------------------------------
 

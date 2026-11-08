@@ -42,7 +42,10 @@ class BackupSession(Base):
     """One write session on a tape (t0 header + t1..tN files)."""
 
     __tablename__ = "sessions"
-    __table_args__ = (Index("ix_sessions_tape_started", "tape_id", "started_at"),)
+    __table_args__ = (
+        Index("ix_sessions_tape_started", "tape_id", "started_at"),
+        Index("ix_sessions_job_started", "job_name", "started_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tape_id: Mapped[int] = mapped_column(ForeignKey("tapes.id"), index=True)
@@ -55,6 +58,8 @@ class BackupSession(Base):
     )
     # ok | partial | failed | erased
     status: Mapped[str] = mapped_column(String(16), default="ok")
+    # full | incremental
+    kind: Mapped[str] = mapped_column(String(16), default="full")
     files_count: Mapped[int] = mapped_column(default=0)
     bytes_total: Mapped[int] = mapped_column(default=0)
     format_version: Mapped[int] = mapped_column(default=1)
@@ -83,6 +88,11 @@ class FileEntry(Base):
     size: Mapped[int] = mapped_column(default=0)
     mtime: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     sha256: Mapped[str] = mapped_column(String(64))
+    # file | archive (one staged zip covering a whole source)
+    kind: Mapped[str] = mapped_column(String(16), default="file")
+    inner_count: Mapped[int] = mapped_column(default=0)
+    # archive content manifest hash; empty for plain files
+    manifest_sha: Mapped[str] = mapped_column(String(64), default="")
     # ok | damaged | skipped
     status: Mapped[str] = mapped_column(String(16), default="ok")
 

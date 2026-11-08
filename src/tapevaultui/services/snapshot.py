@@ -2,8 +2,8 @@
 File:   snapshot.py
 Brief:  Source file snapshotting: walk, pattern filter, sizes and sha256.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.8.0
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import hashlib
 from collections.abc import Iterator
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Literal
 
 import pathspec
 import structlog
@@ -23,14 +24,33 @@ logger = structlog.get_logger(__name__)
 
 READ_CHUNK = 4 * 1024 * 1024
 
+# Size+mtime equality tolerance for incremental baselines: absorbs the
+# float -> datetime -> float round-trip and coarse filesystem timestamps.
+MTIME_TOLERANCE_S = 2.0
+
 
 class PlannedFile(BaseModel):
-    """One source file selected for backup."""
+    """One source file selected for backup.
 
-    path: str = Field(description="Absolute source path")
+    Plain files carry the source file path. Archive sources produce a
+    single entry per source: ``path`` stays the source root (the
+    catalog/header identity), ``staging_path`` points at the cached zip
+    that is actually written to tape, and ``kind`` is "archive".
+    """
+
+    path: str = Field(description="Absolute source path (archive: source root)")
     size: int
     mtime: float
     sha256: str = Field(description="Hex sha256 of the content")
+    kind: Literal["file", "archive"] = "file"
+    staging_path: str | None = Field(
+        default=None,
+        description="Local file written to tape when it differs from path",
+    )
+    inner_count: int = Field(default=0, description="Files inside an archive")
+    manifest_sha: str = Field(
+        default="", description="Archive content manifest hash (archives only)"
+    )
 
 
 class SnapshotError(RuntimeError):
@@ -113,17 +133,22 @@ def snapshot_sources(
     sources: list[SourceDef],
     *,
     continue_on_error: bool = True,
+    baseline: dict[str, tuple[int, float]] | None = None,
 ) -> list[PlannedFile]:
     """Walk all sources and build the file plan with hashes.
 
     Each source may carry gitignore-style ``excludes`` patterns; ignored
-    directories are pruned whole. Files are deduplicated by absolute
-    path; hashing failures either skip the file (continue_on_error) or
-    abort the snapshot.
+    directories are pruned whole. When a baseline is given (incremental
+    runs), files whose size and mtime match the baseline are dropped
+    before hashing — they cost no hash I/O. Files are deduplicated by
+    absolute path; hashing failures either skip the file
+    (continue_on_error) or abort the snapshot.
 
     Args:
         sources: Source definitions from the job.
         continue_on_error: Skip unreadable files instead of failing.
+        baseline: Mapping absolute path -> (size, mtime epoch) of the
+            last backed-up version; matching files are not re-planned.
 
     Returns:
         Planned files sorted by path.
@@ -157,6 +182,22 @@ def snapshot_sources(
                 continue
             try:
                 stat = file_path.stat()
+            except OSError as exc:
+                if continue_on_error:
+                    logger.warning(
+                        "snapshot_file_skipped", path=str(file_path), error=str(exc)
+                    )
+                    continue
+                raise SnapshotError(f"Cannot stat {file_path}: {exc}") from exc
+            if baseline is not None:
+                known = baseline.get(key)
+                if (
+                    known is not None
+                    and known[0] == stat.st_size
+                    and abs(known[1] - stat.st_mtime) <= MTIME_TOLERANCE_S
+                ):
+                    continue
+            try:
                 digest = sha256_of(file_path)
             except (OSError, SnapshotError) as exc:
                 if continue_on_error:

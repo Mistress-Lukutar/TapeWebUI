@@ -127,3 +127,36 @@ def test_snapshot_deduplicates(tmp_path: Path) -> None:
     (root / "a.txt").write_bytes(b"x")
     plan = snapshot_sources([SourceDef(path=str(root)), SourceDef(path=str(root))])
     assert len(plan) == 1
+
+
+def test_snapshot_baseline_skips_unchanged(tmp_path: Path) -> None:
+    """Baseline-matching files are dropped before hashing."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "same.txt").write_bytes(b"SAME")
+    (root / "changed.txt").write_bytes(b"OLD")
+    plan_before = {
+        Path(f.path).name: f
+        for f in snapshot_sources([SourceDef(path=str(root))])
+    }
+    assert set(plan_before) == {"same.txt", "changed.txt"}
+
+    stat = (root / "same.txt").stat()
+    (root / "changed.txt").write_bytes(b"NEW CONTENT")
+    baseline = {
+        str(root / "same.txt"): (stat.st_size, stat.st_mtime),
+    }
+    plan = snapshot_sources([SourceDef(path=str(root))], baseline=baseline)
+    names = [Path(f.path).name for f in plan]
+    assert names == ["changed.txt"]
+
+
+def test_snapshot_baseline_mtime_tolerance(tmp_path: Path) -> None:
+    """mtime differences within tolerance still count as unchanged."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.txt").write_bytes(b"A")
+    stat = (root / "a.txt").stat()
+    baseline = {str(root / "a.txt"): (stat.st_size, stat.st_mtime + 1.0)}
+    plan = snapshot_sources([SourceDef(path=str(root))], baseline=baseline)
+    assert plan == []
