@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.8.0
+Version: v0.9.0
 """
 
 from __future__ import annotations
@@ -24,7 +24,11 @@ from tapevaultui.infrastructure.itdt_transport import (
     ItDtTransport,
 )
 from tapevaultui.services.archive_builder import plan_archive_source
-from tapevaultui.services.catalog import SESSION_HEADER_PATH, CatalogRepository
+from tapevaultui.services.catalog import (
+    SESSION_HEADER_PATH,
+    TAPE_ADOPTION_KEY,
+    CatalogRepository,
+)
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefinition, SourceDef
 from tapevaultui.services.session_io import (
@@ -243,9 +247,7 @@ class BackupEngine:
             continue_on_error=definition.options.continue_on_error,
             baseline=baseline,
         )
-        plan.extend(
-            await self._plan_archives(definition, archive_sources, kind=kind)
-        )
+        plan.extend(await self._plan_archives(definition, archive_sources, kind=kind))
         plan.sort(key=lambda item: item.path)
         stats.files_total = len(plan)
         stats.archives_total = sum(1 for f in plan if f.kind == "archive")
@@ -256,9 +258,7 @@ class BackupEngine:
             raise JobCancelled("cancelled during preparation")
 
         if not plan and kind == "incremental":
-            logger.info(
-                "backup_no_changes", job=definition.name, kind=kind
-            )
+            logger.info("backup_no_changes", job=definition.name, kind=kind)
             return stats
 
         remaining = list(plan)
@@ -476,9 +476,7 @@ class BackupEngine:
             ticker = self._start_ticker(stats)
             filemark_failure: str | None = None
             try:
-                result = await self._transport.run(
-                    ["write", "-raw", "-s", write_path]
-                )
+                result = await self._transport.run(["write", "-raw", "-s", write_path])
                 if result.exit_code == 0:
                     # Delimit the tape file immediately: without a trailing
                     # filemark the header/files merge into one giant tape
@@ -727,6 +725,10 @@ class BackupEngine:
 
         A blank/foreign tape gets a fresh tape_id and is registered as a
         new TapeWebUI tape (it will be claimed by the header written next).
+        When a tape adoption is pending (armed for a re-erased cartridge),
+        the blank tape reuses that catalog record instead: the fresh
+        tape_id replaces the record's uuid while label and history are
+        kept.
 
         Returns:
             Tuple of (tape_id, catalog Tape row).
@@ -734,11 +736,47 @@ class BackupEngine:
         header = await read_session_header(self._transport, self._work_dir)
         if header is None:
             tape_id = str(uuid.uuid4())
+            adopted = self._consume_tape_adoption(tape_id)
+            if adopted is not None:
+                return tape_id, adopted
             tape_row = self._catalog.register_tape(tape_id)
             logger.info("new_tape_registered", tape_id=tape_id)
             return tape_id, tape_row
         tape_row = self._catalog.register_tape(header.tape_id, label=header.tape_label)
         return header.tape_id, tape_row
+
+    def _consume_tape_adoption(self, new_uuid: str) -> Tape | None:
+        """Apply a pending tape adoption when claiming a blank tape.
+
+        The adoption setting is consumed regardless of the outcome, so a
+        stale request cannot silently re-attach to a later, different
+        cartridge.
+
+        Args:
+            new_uuid: Fresh tape identity for the next session header.
+
+        Returns:
+            The adopted Tape row, or None when no adoption is pending.
+        """
+        adoption = self._catalog.get_setting(TAPE_ADOPTION_KEY)
+        self._catalog.delete_setting(TAPE_ADOPTION_KEY)
+        if not adoption:
+            return None
+        tape_id = adoption.get("tape_id")
+        if not isinstance(tape_id, int):
+            logger.warning("tape_adoption_invalid", payload=adoption)
+            return None
+        tape_row = self._catalog.adopt_tape(tape_id, new_uuid)
+        if tape_row is None:
+            logger.warning("tape_adoption_missing_tape", tape_id=tape_id)
+            return None
+        logger.info(
+            "tape_adopted",
+            tape_id=tape_id,
+            label=tape_row.label,
+            uuid=new_uuid,
+        )
+        return tape_row
 
     async def _await_new_tape(
         self,

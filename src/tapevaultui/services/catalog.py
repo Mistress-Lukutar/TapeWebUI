@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.8.0
+Version: v0.9.0
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 import structlog
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from tapevaultui.db.models import (
@@ -30,6 +30,10 @@ logger = structlog.get_logger(__name__)
 
 # Path of the t0 session header pseudo-entry in the files table.
 SESSION_HEADER_PATH = "<session-header>"
+
+# Setting key holding a pending tape adoption request:
+# {"tape_id": <catalog tape id>} for the next blank-tape claim.
+TAPE_ADOPTION_KEY = "tape_adoption"
 
 # Latest-version ranking for a job: (session start, session id, file id)
 # -> (sha256, size, mtime).
@@ -225,6 +229,89 @@ class CatalogRepository:
             tape.last_verified_at = _now()
             session.commit()
             return True
+
+    def delete_tape(self, tape_id: int) -> dict[str, int] | None:
+        """Delete a tape record together with its session history.
+
+        The deletion is refused while the tape still holds live
+        (non-erased) sessions: those are the restore catalog for data
+        still on the cartridge. Mark them erased first, then delete.
+
+        Args:
+            tape_id: Tape primary key.
+
+        Returns:
+            Dict with deleted session and file counts, or None if the
+            tape does not exist.
+
+        Raises:
+            ValueError: If the tape has non-erased sessions.
+        """
+        with self._session_factory() as session:
+            tape = session.get(Tape, tape_id)
+            if tape is None:
+                return None
+            sessions = list(
+                session.scalars(
+                    select(BackupSession).where(BackupSession.tape_id == tape_id)
+                )
+            )
+            live_count = sum(1 for s in sessions if s.status != "erased")
+            if live_count:
+                raise ValueError(
+                    f"Tape {tape_id} still has {live_count} non-erased "
+                    "session(s); mark them erased before deleting the tape"
+                )
+            session_ids = [record.id for record in sessions]
+            files_deleted = 0
+            if session_ids:
+                # JobRun rows keep the run history; only detach them.
+                job_runs = session.scalars(
+                    select(JobRun).where(JobRun.session_id.in_(session_ids))
+                )
+                for job_run in job_runs:
+                    job_run.session_id = None
+                files_deleted = int(
+                    session.execute(
+                        delete(FileEntry).where(FileEntry.session_id.in_(session_ids))
+                    ).rowcount
+                    or 0
+                )
+                session.execute(
+                    delete(BackupSession).where(BackupSession.id.in_(session_ids))
+                )
+            session.delete(tape)
+            session.commit()
+        logger.info(
+            "catalog_tape_deleted",
+            tape_id=tape_id,
+            sessions=len(session_ids),
+            files=files_deleted,
+        )
+        return {"deleted_sessions": len(session_ids), "deleted_files": files_deleted}
+
+    def adopt_tape(self, tape_id: int, new_uuid: str) -> Tape | None:
+        """Re-identify an existing tape record with a fresh uuid.
+
+        Used when a physically erased cartridge is adopted back into
+        its old catalog record: the fresh uuid is what the next session
+        header will carry, while id, label, notes and session history
+        are preserved.
+
+        Args:
+            tape_id: Tape primary key of the adopted record.
+            new_uuid: The uuid the next session header will use.
+
+        Returns:
+            The updated Tape row, or None if the record does not exist.
+        """
+        with self._session_factory() as session:
+            tape = session.get(Tape, tape_id)
+            if tape is None:
+                return None
+            tape.uuid = new_uuid
+            session.commit()
+            return tape
 
     def mark_sessions_erased(self, session_ids: list[int]) -> int:
         """Mark specific sessions erased (deep-scan apply).
@@ -584,9 +671,7 @@ class CatalogRepository:
                     latest[entry.path] = (rank, version)
             return {path: value for path, (_, value) in latest.items()}
 
-    def latest_archive_versions(
-        self, job_name: str
-    ) -> dict[str, tuple[str, str]]:
+    def latest_archive_versions(self, job_name: str) -> dict[str, tuple[str, str]]:
         """Newest backed-up archive entry per source path, for skip checks.
 
         Like ``latest_job_file_versions`` but restricted to
@@ -864,6 +949,18 @@ class CatalogRepository:
             else:
                 record.value_json = value_json
             session.commit()
+
+    def delete_setting(self, key: str) -> None:
+        """Remove a setting row (no-op when the key is absent).
+
+        Args:
+            key: Setting key to remove.
+        """
+        with self._session_factory() as session:
+            record = session.get(Setting, key)
+            if record is not None:
+                session.delete(record)
+                session.commit()
 
 
 def _now() -> datetime:

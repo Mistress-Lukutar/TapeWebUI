@@ -2,15 +2,19 @@
 File:   test_catalog_api.py
 Brief:  API tests for tapes, catalog search, history and restore endpoints.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.0
 """
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
+
+from tapevaultui.services.tape_format import build_session_header, serialize_header
 
 
 def _seed(client: TestClient) -> tuple[int, list[int]]:
@@ -110,8 +114,6 @@ def test_restore_plan_and_run(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["accepted"] is True
 
-    import time
-
     # The blank default fake has no matching tape: engine waits for it.
     for _ in range(50):
         status = client.get("/api/restore/status").json()
@@ -129,6 +131,72 @@ def test_restore_plan_and_run(client: TestClient) -> None:
             break
         time.sleep(0.05)
     assert status["active"]["state"] == "cancelled"
+
+
+def test_tape_delete_endpoint(client: TestClient) -> None:
+    """Delete refuses live sessions, then cascades an erased tape."""
+    tape_id, _ = _seed(client)
+
+    response = client.delete(f"/api/tapes/{tape_id}")
+    assert response.status_code == 409
+    assert "non-erased" in response.json()["detail"]
+    assert client.get(f"/api/tapes/{tape_id}").status_code == 200
+
+    catalog = client.app.state.catalog  # type: ignore[attr-defined]
+    catalog.mark_tape_erased(tape_id)
+
+    response = client.delete(f"/api/tapes/{tape_id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted_sessions"] == 1
+    assert body["deleted_files"] == 2
+    assert client.get(f"/api/tapes/{tape_id}").status_code == 404
+    assert client.get("/api/tapes").json() == []
+    assert client.delete(f"/api/tapes/{tape_id}").status_code == 404
+
+
+def test_tape_adopt_blank_tape(client: TestClient) -> None:
+    """Adoption arms on a blank tape and the list marks it pending.
+
+    The default fake transport reads as a blank cartridge, so the
+    adopt precondition is satisfied without extra scenarios.
+    """
+    tape_id, _ = _seed(client)
+    catalog = client.app.state.catalog  # type: ignore[attr-defined]
+    catalog.mark_tape_erased(tape_id)
+
+    response = client.post(f"/api/tapes/{tape_id}/adopt")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == tape_id
+    assert body["adoption_pending"] is True
+    assert body["uuid"] != "uuid-api-tape"  # re-identified at arm time
+
+    response = client.get("/api/tapes")
+    assert response.status_code == 200
+    assert response.json()[0]["adoption_pending"] is True
+
+    response = client.delete(f"/api/tapes/{tape_id}/adopt")
+    assert response.status_code == 200
+    assert response.json()["adoption_pending"] is False
+    assert client.get("/api/tapes").json()[0]["adoption_pending"] is False
+
+
+def test_tape_adopt_rejects_tapewebui_tape(client: TestClient) -> None:
+    """Adoption refuses a loaded tape that already holds sessions."""
+    tape_id, _ = _seed(client)
+    header = build_session_header(
+        tape_id="on-tape-uuid",
+        session_id=str(uuid4()),
+        started_at=datetime.now(UTC),
+    )
+    fake = client.app.state.transport  # type: ignore[attr-defined]
+    fake.scenarios["read"] = (serialize_header(header).decode(), 0)
+
+    response = client.post(f"/api/tapes/{tape_id}/adopt")
+    assert response.status_code == 409
+    assert "already holds" in response.json()["detail"]
+    assert client.post("/api/tapes/9999/adopt").status_code == 404
 
 
 def test_restore_plan_validation(client: TestClient) -> None:

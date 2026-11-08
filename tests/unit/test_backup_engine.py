@@ -3,7 +3,7 @@ File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.8.0
+Version: v0.9.0
 """
 
 from __future__ import annotations
@@ -18,7 +18,10 @@ from tapevaultui.services.backup_engine import (
     BackupStats,
     TapeFullError,
 )
-from tapevaultui.services.catalog import CatalogRepository
+from tapevaultui.services.catalog import (
+    TAPE_ADOPTION_KEY,
+    CatalogRepository,
+)
 from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.job_defs import JobDefinition
 from tapevaultui.services.session_io import new_session_id
@@ -198,6 +201,58 @@ async def test_verify_readback_updates_files(tmp_path: Path) -> None:
     # Verify damage must be visible in the stats (no silent "done").
     assert stats.hash_mismatches == 1
     assert "verification failed" in stats.error
+
+
+async def test_backup_adopts_pending_tape(tmp_path: Path) -> None:
+    """A pending adoption reuses the old catalog record for a blank tape.
+
+    The re-erased cartridge keeps its catalog row (label, erased
+    history) while the fresh uuid is what the new session header and
+    the record carry; the adoption setting is consumed.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    tape = repo.register_tape("old-tape-uuid", label="Shelf A")
+    old_session = repo.create_session(tape.id, job_name="old")
+    repo.finish_session(old_session.id, status="ok")
+    repo.mark_tape_erased(tape.id)
+    repo.set_setting(TAPE_ADOPTION_KEY, {"tape_id": tape.id})
+
+    fake = FakeItDtTransport()  # reads as blank after the erase
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path, verify="none"), BackupStats("testjob"))
+
+    tapes = repo.list_tapes()
+    assert len(tapes) == 1  # no duplicate record for the same cartridge
+    adopted = tapes[0]
+    assert adopted.id == tape.id
+    assert adopted.uuid != "old-tape-uuid"  # fresh identity on the header
+    assert adopted.label == "Shelf A"  # label and history preserved
+    sessions = repo.list_sessions(tape.id)
+    assert [s.status for s in sessions] == ["erased", "ok"]
+    assert sessions[1].file_base == 0  # erased sessions do not offset
+    assert repo.get_setting(TAPE_ADOPTION_KEY) is None  # consumed
+
+
+async def test_backup_without_adoption_registers_new_tape(tmp_path: Path) -> None:
+    """A stale adoption payload falls back to plain registration."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    repo.set_setting(TAPE_ADOPTION_KEY, {"tape_id": 424242})  # missing record
+
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path, verify="none"), BackupStats("testjob"))
+
+    tapes = repo.list_tapes()
+    assert len(tapes) == 1
+    assert repo.get_setting(TAPE_ADOPTION_KEY) is None
 
 
 async def test_verify_readback_ok_when_content_matches(tmp_path: Path) -> None:

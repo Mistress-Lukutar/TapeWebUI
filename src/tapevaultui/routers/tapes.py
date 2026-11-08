@@ -2,17 +2,26 @@
 File:   tapes.py
 Brief:  Tapes, catalog search and history API endpoints.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.0
 """
 
 from __future__ import annotations
+
+import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from tapevaultui.db.models import BackupSession, FileEntry, Tape
-from tapevaultui.dependencies import CatalogDep
+from tapevaultui.dependencies import CatalogDep, SettingsDep, TransportDep
+from tapevaultui.services.catalog import TAPE_ADOPTION_KEY
+from tapevaultui.services.session_io import (
+    NoMediaError,
+    SessionIoError,
+    TapeFormatError,
+    identify_tape,
+)
 
 router = APIRouter(prefix="/api", tags=["tapes"])
 
@@ -28,6 +37,7 @@ class TapeOut(BaseModel):
     created_at: str
     notes: str
     last_verified_at: str | None = None
+    adoption_pending: bool = False
 
 
 class TapeUpdate(BaseModel):
@@ -86,6 +96,13 @@ class TapeNotesUpdateResponse(BaseModel):
     erased_sessions: int
 
 
+class TapeDeleteResponse(BaseModel):
+    """Cascade summary of a deleted tape record."""
+
+    deleted_sessions: int
+    deleted_files: int
+
+
 @router.get("/tapes", response_model=list[TapeOut])
 async def list_tapes(catalog: CatalogDep) -> list[TapeOut]:
     """List all known tapes.
@@ -96,7 +113,14 @@ async def list_tapes(catalog: CatalogDep) -> list[TapeOut]:
     Returns:
         Tapes ordered by creation time.
     """
-    return [_tape_out(tape) for tape in catalog.list_tapes()]
+    adoption = catalog.get_setting(TAPE_ADOPTION_KEY)
+    pending_id = adoption.get("tape_id") if adoption else None
+    results: list[TapeOut] = []
+    for tape in catalog.list_tapes():
+        item = _tape_out(tape)
+        item.adoption_pending = tape.id == pending_id
+        results.append(item)
+    return results
 
 
 @router.get("/tapes/{tape_id}")
@@ -116,6 +140,7 @@ async def get_tape(tape_id: int, catalog: CatalogDep) -> dict[str, object]:
     tape = catalog.get_tape(tape_id)
     if tape is None:
         raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
+    adoption = catalog.get_setting(TAPE_ADOPTION_KEY)
     sessions = [
         SessionOut(
             id=session.id,
@@ -143,6 +168,7 @@ async def get_tape(tape_id: int, catalog: CatalogDep) -> dict[str, object]:
         "last_verified_at": tape.last_verified_at.isoformat()
         if tape.last_verified_at
         else None,
+        "adoption_pending": bool(adoption) and adoption.get("tape_id") == tape_id,
         "sessions": [session.model_dump() for session in sessions],
     }
 
@@ -218,6 +244,123 @@ async def erase_mark_sessions(
     valid_ids = [sid for sid in payload.session_ids if sid in known_ids]
     count = catalog.mark_sessions_erased(valid_ids)
     return TapeNotesUpdateResponse(erased_sessions=count)
+
+
+@router.delete("/tapes/{tape_id}", response_model=TapeDeleteResponse)
+async def delete_tape(tape_id: int, catalog: CatalogDep) -> TapeDeleteResponse:
+    """Delete a tape record and its session history.
+
+    Refused while the tape has non-erased sessions: those are the
+    restore catalog for data still on the cartridge.
+
+    Args:
+        tape_id: Tape primary key.
+        catalog: Catalog repository.
+
+    Returns:
+        Deleted session and file counts.
+
+    Raises:
+        HTTPException: 404 if the tape does not exist, 409 if it still
+            holds non-erased sessions.
+    """
+    try:
+        result = catalog.delete_tape(tape_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
+    return TapeDeleteResponse(**result)
+
+
+@router.post("/tapes/{tape_id}/adopt", response_model=TapeOut)
+async def adopt_tape(
+    tape_id: int,
+    catalog: CatalogDep,
+    transport: TransportDep,
+    settings: SettingsDep,
+) -> TapeOut:
+    """Arm an adoption: reuse this record for a blank tape in the drive.
+
+    The drive must hold a blank/foreign cartridge (no TapeWebUI
+    header). The next backup write that claims a blank tape reuses
+    this catalog record — a fresh uuid is assigned, but id, label,
+    notes and session history are preserved.
+
+    Args:
+        tape_id: Tape primary key of the record to reuse.
+        catalog: Catalog repository.
+        transport: ITDT transport dependency.
+        settings: App settings (work dir for header reads).
+
+    Returns:
+        The updated tape with adoption_pending set.
+
+    Raises:
+        HTTPException: 404 if the tape does not exist, 409 when no
+            medium is loaded, the loaded tape is not blank, or it
+            cannot be identified.
+    """
+    tape = catalog.get_tape(tape_id)
+    if tape is None:
+        raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
+    work_dir = settings.data_dir / "tmp"
+    try:
+        header = await identify_tape(transport, work_dir)
+    except NoMediaError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No tape loaded in the drive: {exc}",
+        ) from exc
+    except TapeFormatError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Loaded tape holds an incompatible header: {exc}",
+        ) from exc
+    except SessionIoError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot identify the loaded tape: {exc}",
+        ) from exc
+    if header is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The loaded tape already holds TapeWebUI sessions "
+                "(header uuid " + header.tape_id[:8] + "...); erase it first"
+            ),
+        )
+    new_uuid = str(uuid.uuid4())
+    catalog.adopt_tape(tape_id, new_uuid)
+    catalog.set_setting(TAPE_ADOPTION_KEY, {"tape_id": tape_id})
+    updated = catalog.get_tape(tape_id)
+    assert updated is not None
+    item = _tape_out(updated)
+    item.adoption_pending = True
+    return item
+
+
+@router.delete("/tapes/{tape_id}/adopt", response_model=TapeOut)
+async def cancel_adoption(tape_id: int, catalog: CatalogDep) -> TapeOut:
+    """Cancel a pending adoption for a tape.
+
+    Args:
+        tape_id: Tape primary key the adoption was armed for.
+        catalog: Catalog repository.
+
+    Returns:
+        The tape with adoption_pending cleared.
+
+    Raises:
+        HTTPException: 404 if the tape does not exist.
+    """
+    tape = catalog.get_tape(tape_id)
+    if tape is None:
+        raise HTTPException(status_code=404, detail=f"Tape not found: {tape_id}")
+    adoption = catalog.get_setting(TAPE_ADOPTION_KEY)
+    if adoption and adoption.get("tape_id") == tape_id:
+        catalog.delete_setting(TAPE_ADOPTION_KEY)
+    return _tape_out(tape)
 
 
 @router.get("/tapes/{tape_id}/files", response_model=list[FileOut])

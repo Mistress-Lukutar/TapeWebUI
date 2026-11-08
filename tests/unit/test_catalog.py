@@ -2,8 +2,8 @@
 File:   test_catalog.py
 Brief:  Catalog repository unit tests on in-memory SQLite.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.0
 """
 
 from __future__ import annotations
@@ -180,6 +180,99 @@ def test_jobs_and_runs(repo: CatalogRepository) -> None:
     fetched = repo.get_job(job.id)
     assert fetched is not None
     assert fetched.name == "photos"
+
+
+def test_delete_tape_cascades_erased_sessions(repo: CatalogRepository) -> None:
+    """Deleting an erased tape removes its history and detaches runs."""
+    tape = repo.register_tape("uuid-1", label="Old")
+    session = repo.create_session(tape.id, job_name="photos")
+    mtime = datetime.now(UTC)
+    repo.add_file(
+        session.id,
+        tape_file_index=0,
+        path=SESSION_HEADER_PATH,
+        size=1,
+        mtime=mtime,
+        sha256="0" * 64,
+    )
+    repo.add_file(
+        session.id,
+        tape_file_index=1,
+        path="D:/a.jpg",
+        size=10,
+        mtime=mtime,
+        sha256="1" * 64,
+    )
+    repo.finish_session(session.id, status="ok")
+    job = repo.upsert_job("photos")
+    run = repo.create_job_run(job.id)
+    repo.update_job_run(run.id, session_id=session.id)
+    repo.mark_tape_erased(tape.id)
+
+    result = repo.delete_tape(tape.id)
+    assert result == {"deleted_sessions": 1, "deleted_files": 2}
+    assert repo.get_tape(tape.id) is None
+    assert repo.list_sessions(tape.id) == []
+    fetched_run = repo.get_job_run(run.id)
+    assert fetched_run is not None
+    assert fetched_run.session_id is None  # run history kept, detached
+
+
+def test_delete_tape_refuses_live_sessions(repo: CatalogRepository) -> None:
+    """Deletion is blocked while the tape holds a non-erased session."""
+    tape = repo.register_tape("uuid-1")
+    session = repo.create_session(tape.id, job_name="photos")
+    repo.add_file(
+        session.id,
+        tape_file_index=0,
+        path="D:/a.jpg",
+        size=10,
+        mtime=datetime.now(UTC),
+        sha256="1" * 64,
+    )
+    repo.finish_session(session.id, status="ok")
+
+    with pytest.raises(ValueError, match="non-erased"):
+        repo.delete_tape(tape.id)
+    assert repo.get_tape(tape.id) is not None
+
+
+def test_delete_tape_missing_returns_none(repo: CatalogRepository) -> None:
+    """Deleting an unknown tape id reports None instead of raising."""
+    assert repo.delete_tape(424242) is None
+
+
+def test_adopt_tape_replaces_uuid_and_keeps_history(
+    repo: CatalogRepository,
+) -> None:
+    """Adoption re-identifies the record but keeps id, label, history."""
+    tape = repo.register_tape("old-uuid", label="Shelf A")
+    session = repo.create_session(tape.id, job_name="photos")
+    repo.finish_session(session.id, status="ok")
+    repo.mark_tape_erased(tape.id)
+
+    adopted = repo.adopt_tape(tape.id, "new-uuid")
+    assert adopted is not None
+    assert adopted.id == tape.id
+    assert adopted.uuid == "new-uuid"
+    assert adopted.label == "Shelf A"
+    assert repo.get_tape_by_uuid("new-uuid") is not None
+    assert repo.get_tape_by_uuid("old-uuid") is None
+    sessions = repo.list_sessions(tape.id)
+    assert [s.status for s in sessions] == ["erased"]  # history preserved
+
+
+def test_adopt_tape_missing_returns_none(repo: CatalogRepository) -> None:
+    """Adopting an unknown tape id reports None."""
+    assert repo.adopt_tape(424242, "new-uuid") is None
+
+
+def test_delete_setting_roundtrip(repo: CatalogRepository) -> None:
+    """delete_setting removes the row and tolerates absent keys."""
+    repo.set_setting("tape_adoption", {"tape_id": 1})
+    repo.delete_setting("tape_adoption")
+    assert repo.get_setting("tape_adoption") is None
+    repo.delete_setting("tape_adoption")  # no-op on missing key
 
 
 def test_settings_roundtrip(repo: CatalogRepository) -> None:
