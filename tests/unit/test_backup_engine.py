@@ -778,3 +778,20 @@ async def test_mixed_sources_write_plain_and_archive(tmp_path: Path) -> None:
     kinds = {entry.path: entry.kind for entry in files}
     assert kinds[str(plain / "p.txt")] == "file"
     assert kinds[str(src)] == "archive"
+
+
+def test_looks_like_eom_word_boundaries() -> None:
+    """Only explicit end-of-medium wording classifies as tape-full.
+
+    A substring match also fired inside unrelated media-error text,
+    misreporting a failing write on a worn cartridge as "tape full"
+    (v0.9.0 incident report); ``eom`` must match as a whole word only.
+    """
+    from tapevaultui.services.backup_engine import _looks_like_eom
+
+    assert _looks_like_eom("Error: end of data detected")
+    assert _looks_like_eom("Error: End of Medium detected")
+    assert _looks_like_eom("Error: EOM detected")
+    assert _looks_like_eom("Early warning zone reached")
+    assert not _looks_like_eom("Write failed: medium error 0x31090002")
+    assert not _looks_like_eom("Write failed: pseudoeom garbage")

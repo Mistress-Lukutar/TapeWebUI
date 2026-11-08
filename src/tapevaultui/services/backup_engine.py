@@ -9,6 +9,7 @@ Version: v0.9.0
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -73,8 +74,18 @@ class JobCancelled(BackupEngineError):
     """Raised when the job was cancelled between files."""
 
 
+_EOM_PATTERN = re.compile(
+    r"\b(end of data|end of medium|early warning|eom)\b", re.IGNORECASE
+)
+
+
 def _looks_like_eom(stdout: str) -> bool:
     """Check whether ITDT output indicates end of medium.
+
+    ``eom`` only matches as a whole word: a substring match also fires
+    inside unrelated media-error text and would misreport a worn/failing
+    tape as "tape full" (observed on an old cartridge that failed writes
+    after a few megabytes).
 
     Args:
         stdout: ITDT output text.
@@ -82,8 +93,7 @@ def _looks_like_eom(stdout: str) -> bool:
     Returns:
         True if the output suggests the tape is full.
     """
-    lowered = stdout.lower()
-    return "end of data" in lowered or "eom" in lowered or "end of medium" in lowered
+    return _EOM_PATTERN.search(stdout) is not None
 
 
 class BackupStats:
@@ -495,6 +505,14 @@ class BackupEngine:
                     filemark_failure
                     if filemark_failure is not None
                     else result.stdout.strip()
+                )
+                # Log before classifying: the EOM branch has no other
+                # trace of the raw output, which is exactly what a
+                # misdiagnosed media failure needs for post-mortem.
+                logger.warning(
+                    "backup_write_failed",
+                    path=file.path,
+                    output=stdout,
                 )
                 if filemark_failure is None and _looks_like_eom(stdout):
                     # Tape full: this file was NOT written; the next pass
