@@ -2,7 +2,7 @@
 import { onMounted, computed, ref } from 'vue'
 import { useDriveStore } from './composables/useDriveStore'
 import { useRuntimeStore } from './composables/useRuntimeStore'
-import { formatBytes, formatIso } from './api'
+import { formatIso } from './api'
 import Jobs from './pages/Jobs.vue'
 import Tapes from './pages/Tapes.vue'
 import Restore from './pages/Restore.vue'
@@ -10,6 +10,7 @@ import History from './pages/History.vue'
 import Settings from './pages/Settings.vue'
 import Service from './pages/Service.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import ActiveJobWidget from './components/ActiveJobWidget.vue'
 
 type Page = 'dashboard' | 'jobs' | 'tapes' | 'restore' | 'history' | 'settings' | 'service'
 
@@ -188,23 +189,6 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="panel" v-if="runtime.state.job && runtime.state.job.state !== 'done'">
-          <h2>Active job</h2>
-          <div class="kv-grid">
-            <dt>Job</dt><dd>{{ runtime.state.job.job_name || '—' }} ({{ runtime.state.job.state }})</dd>
-            <dt>Files</dt><dd>{{ runtime.state.job.files_done }} / {{ runtime.state.job.files_total }}</dd>
-            <dt>Bytes</dt>
-            <dd>{{ formatBytes(runtime.state.job.bytes_done) }} / {{ formatBytes(runtime.state.job.bytes_total) }}</dd>
-            <dt>Speed</dt><dd>{{ formatBytes(runtime.state.job.speed_bps) }}/s</dd>
-            <dt>ETA</dt><dd>{{ runtime.state.job.eta_s !== null ? `${runtime.state.job.eta_s} s` : '—' }}</dd>
-            <dt>Current file</dt><dd class="mono">{{ runtime.state.job.current_file || '—' }}</dd>
-            <template v-if="runtime.state.job.hash_mismatches">
-              <dt>Damaged</dt><dd class="error-text">{{ runtime.state.job.hash_mismatches }}</dd>
-            </template>
-            <dt v-if="runtime.state.job.error">Error</dt>
-            <dd v-if="runtime.state.job.error" class="error-text">{{ runtime.state.job.error }}</dd>
-          </div>
-        </div>
       </main>
 
       <main v-else-if="page === 'jobs'"><Jobs /></main>
@@ -215,5 +199,7 @@ onMounted(() => {
       <main v-else-if="page === 'service'"><Service /></main>
     </div>
   </div>
+  <!-- Floating job summary on every tab; Jobs has its own inline panel. -->
+  <ActiveJobWidget v-if="page !== 'jobs'" />
   <ConfirmDialog />
 </template>

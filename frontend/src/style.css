@@ -89,7 +89,6 @@ button.primary:hover:not(:disabled) {
 
 .panel {
   background: var(--bg-panel);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 16px;
@@ -139,7 +138,6 @@ button.primary:hover:not(:disabled) {
 .error-strip {
   background: var(--danger-bg);
   color: var(--danger-text);
-  border: 1px solid var(--danger);
   border-radius: var(--radius);
   padding: 8px 12px;
   margin: 8px 0;
@@ -149,7 +147,6 @@ button.primary:hover:not(:disabled) {
 .info-strip {
   background: rgba(240, 166, 54, 0.1);
   color: #f0a636;
-  border: 1px solid rgba(240, 166, 54, 0.4);
   border-radius: var(--radius);
   padding: 8px 12px;
   margin: 8px 0;
@@ -169,9 +166,13 @@ button.primary:hover:not(:disabled) {
 }
 
 /* App shell: fixed sidebar (design adapted from Synth-Gallery) + main content. */
+/* App shell: fixed sidebar (design adapted from Synth-Gallery) + main content.
+   justify-content centers the content column in the viewport; the fixed
+   sidebar overlays the left, so the block sits centered in the free space. */
 .app-layout {
   display: flex;
   min-height: 100vh;
+  justify-content: center;
 }
 
 .sidebar {
@@ -247,7 +248,7 @@ button.primary:hover:not(:disabled) {
 }
 
 .main-content {
-  flex: 1;
+  flex: 0 1 1632px; /* 1600 content + 2×16 padding */
   min-width: 0;
   margin-left: 240px;
   padding: 0 16px 32px;
@@ -660,7 +661,6 @@ button.danger:hover:not(:disabled) {
 
 .modal {
   background: var(--bg-panel);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
   width: 100%;
@@ -751,12 +751,166 @@ button.danger-solid:hover:not(:disabled) {
   margin: 0;
 }
 
+.job-sources {
+  max-width: 460px;
+  min-width: 220px;
+}
+
 .job-source {
   display: flex;
   align-items: center;
   gap: 6px;
+  max-width: 100%;
 }
 
 .job-source .mono {
   font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-toggle {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent, #4aa3ff);
+  cursor: pointer;
+  font: inherit;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+/* Floating active-job summary, pinned top-right above all other content. */
+.job-widget {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 250; /* above sidebar (150) and modals (200) */
+  background: var(--bg-panel);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.55);
+  font-size: 13px;
+  max-width: 360px;
+  overflow: hidden;
+}
+
+.job-widget-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.job-widget-bar:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.job-widget-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: job-widget-pulse 1.6s ease-in-out infinite;
+}
+
+.job-widget-dot.wait {
+  background: var(--warning);
+}
+
+.job-widget-dot.error {
+  background: var(--danger);
+  animation: none;
+}
+
+@keyframes job-widget-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.job-widget-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-widget-pct {
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 600;
+  font-family: Consolas, monospace;
+}
+
+.job-widget-chevron {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.job-widget-detail {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.job-widget-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-input);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.job-widget-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.job-widget-fill.error {
+  background: var(--danger);
+}
+
+.job-widget-grid {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  row-gap: 4px;
+  column-gap: 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.job-widget-grid dt {
+  color: var(--text-dim);
+}
+
+.job-widget-grid dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-widget-grid dd.error-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }

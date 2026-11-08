@@ -20,3 +20,6 @@ gui-test-screenshots/
 .env
 .zcode
 .agents
+
+# Scratch scripts
+.tmp/

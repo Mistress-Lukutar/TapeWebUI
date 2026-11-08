@@ -351,36 +351,38 @@ onMounted(() => {
             <td>{{ formatBytes(tape.bytes_used) }}</td>
             <td>{{ formatIso(tape.created_at) }}</td>
             <td>{{ formatIso(tape.last_verified_at) }}</td>
-            <td class="row-actions">
-              <template v-if="renamingId === tape.id">
-                <button class="primary" @click="saveRename(tape)">Save</button>
-                <button @click="renamingId = null">Cancel</button>
-              </template>
-              <template v-else>
-                <button @click="startRename(tape)">Rename</button>
-                <button
-                  v-if="tape.adoption_pending"
-                  title="Cancel the pending adoption for this record"
-                  @click="cancelAdoption(tape)"
-                >
-                  Cancel adopt
-                </button>
-                <button
-                  v-else
-                  title="Reuse this record for a blank (erased) tape currently in the drive"
-                  @click="adoptTape(tape)"
-                >
-                  Adopt tape
-                </button>
-                <button class="danger" @click="markErased(tape)">Erase-mark</button>
-                <button
-                  class="danger"
-                  title="Delete this record and its erased session history from the catalog"
-                  @click="deleteTape(tape)"
-                >
-                  Delete
-                </button>
-              </template>
+            <td>
+              <div class="row-actions">
+                <template v-if="renamingId === tape.id">
+                  <button class="primary" @click="saveRename(tape)">Save</button>
+                  <button @click="renamingId = null">Cancel</button>
+                </template>
+                <template v-else>
+                  <button @click="startRename(tape)">Rename</button>
+                  <button
+                    v-if="tape.adoption_pending"
+                    title="Cancel the pending adoption for this record"
+                    @click="cancelAdoption(tape)"
+                  >
+                    Cancel adopt
+                  </button>
+                  <button
+                    v-else
+                    title="Reuse this record for a blank (erased) tape currently in the drive"
+                    @click="adoptTape(tape)"
+                  >
+                    Adopt tape
+                  </button>
+                  <button class="danger" @click="markErased(tape)">Erase-mark</button>
+                  <button
+                    class="danger"
+                    title="Delete this record and its erased session history from the catalog"
+                    @click="deleteTape(tape)"
+                  >
+                    Delete
+                  </button>
+                </template>
+              </div>
             </td>
           </tr>
         </tbody>

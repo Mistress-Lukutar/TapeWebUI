@@ -64,6 +64,25 @@ const ignoreRules = ref<string[]>([])
 const newRule = ref('')
 const ignoreDirty = ref(false)
 
+const SOURCE_PREVIEW_LIMIT = 5
+const expandedSources = ref<Set<string>>(new Set())
+
+function visibleSources(job: JobEntry): JobSourceInfo[] {
+  return expandedSources.value.has(job.name)
+    ? job.info.sources
+    : job.info.sources.slice(0, SOURCE_PREVIEW_LIMIT)
+}
+
+function toggleSources(job: JobEntry) {
+  const next = new Set(expandedSources.value)
+  if (next.has(job.name)) {
+    next.delete(job.name)
+  } else {
+    next.add(job.name)
+  }
+  expandedSources.value = next
+}
+
 const parsedSources = computed<YamlSource[]>(() => {
   try {
     const doc = yamlLoad(editorText.value)
@@ -323,12 +342,28 @@ onMounted(load)
           :class="{ selected: selected?.name === job.name }"
         >
           <td class="nowrap">{{ job.name }}</td>
-          <td>
+          <td class="job-sources">
             <template v-if="job.info.sources.length">
-              <div v-for="(source, idx) in job.info.sources" :key="idx" class="job-source">
+              <div
+                v-for="(source, idx) in visibleSources(job)"
+                :key="idx"
+                class="job-source"
+                :title="source.path"
+              >
                 <span class="mono">{{ source.path }}</span>
                 <span v-if="source.archive" class="badge ok">zip</span>
               </div>
+              <button
+                v-if="job.info.sources.length > SOURCE_PREVIEW_LIMIT"
+                class="link-btn source-toggle"
+                @click="toggleSources(job)"
+              >
+                {{
+                  expandedSources.has(job.name)
+                    ? '▲ collapse'
+                    : `▼ show ${job.info.sources.length - SOURCE_PREVIEW_LIMIT} more`
+                }}
+              </button>
             </template>
             <span v-else class="dim">—</span>
           </td>
@@ -336,10 +371,12 @@ onMounted(load)
             {{ job.info.mode }} · {{ job.info.verify }} · {{ job.info.backupType }}
           </td>
           <td class="nowrap">{{ job.info.schedule }}</td>
-          <td class="row-actions nowrap">
-            <button @click="runJob(job.name)">Run</button>
-            <button @click="openEditor(job)">Edit</button>
-            <button class="danger" @click="removeJob(job.name)">Delete</button>
+          <td class="nowrap">
+            <div class="row-actions">
+              <button @click="runJob(job.name)">Run</button>
+              <button @click="openEditor(job)">Edit</button>
+              <button class="danger" @click="removeJob(job.name)">Delete</button>
+            </div>
           </td>
         </tr>
       </tbody>
