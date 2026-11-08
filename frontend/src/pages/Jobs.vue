@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { dump as yamlDump, load as yamlLoad } from 'js-yaml'
 import { apiGet, apiSend, formatIso } from '../api'
 import { useRuntimeStore } from '../composables/useRuntimeStore'
+import { formatDuration } from '../utils/duration'
 
 interface JobRow {
   name: string
@@ -308,10 +309,20 @@ onMounted(load)
     <h3>Active job</h3>
     <div class="kv-grid">
       <dt>Job</dt><dd>{{ runtime.state.job.job_name || '—' }} ({{ runtime.state.job.state }})</dd>
-      <dt>Files</dt><dd>{{ runtime.state.job.files_done }} / {{ runtime.state.job.files_total }}</dd>
+      <dt>Files</dt>
+      <dd>
+        {{ runtime.state.job.files_done }} / {{ runtime.state.job.files_total }}
+        <span
+          v-if="(runtime.state.job.archives ?? 0) > 0"
+          class="dim"
+        >({{ runtime.state.job.archived_files }} files in
+          {{ runtime.state.job.archives }} zip{{
+            (runtime.state.job.archives ?? 0) > 1 ? 's' : ''
+          }})</span>
+      </dd>
       <dt>Bytes</dt><dd>{{ runtime.state.job.bytes_done }} / {{ runtime.state.job.bytes_total }}</dd>
       <dt>Speed</dt><dd>{{ runtime.state.job.speed_bps }} B/s</dd>
-      <dt>ETA</dt><dd>{{ runtime.state.job.eta_s ?? '—' }} s</dd>
+      <dt>ETA</dt><dd>{{ formatDuration(runtime.state.job.eta_s) }}</dd>
       <dt>Current file</dt><dd>{{ runtime.state.job.current_file || '—' }}</dd>
       <dt v-if="runtime.state.job.error">Error</dt>
       <dd v-if="runtime.state.job.error" class="error-text">{{ runtime.state.job.error }}</dd>

@@ -607,6 +607,8 @@ async def test_archive_source_writes_one_tape_file(tmp_path: Path) -> None:
     await engine.execute(_archive_definition(tmp_path), stats)
 
     assert stats.files_total == 1  # the zip, not the two inner files
+    assert stats.archives_total == 1
+    assert stats.archived_files == 2
     writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
     assert len(writes) == 2  # header + one archive tape file
     assert "header_" in writes[0][3]
@@ -712,6 +714,8 @@ async def test_mixed_sources_write_plain_and_archive(tmp_path: Path) -> None:
     await engine.execute(_archive_definition(tmp_path, extra_plain=True), stats)
 
     assert stats.files_total == 2  # 1 plain file + 1 archive zip
+    assert stats.archives_total == 1
+    assert stats.archived_files == 1  # the archive source holds a.txt only
     writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
     assert len(writes) == 3  # header + plain file + archive zip
     session = repo.list_sessions(repo.list_tapes()[0].id)[0]

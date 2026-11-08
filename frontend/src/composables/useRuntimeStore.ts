@@ -7,6 +7,8 @@ export interface RuntimeJob {
   state: string
   files_total: number
   files_done: number
+  archives?: number
+  archived_files?: number
   bytes_total: number
   bytes_done: number
   current_file: string

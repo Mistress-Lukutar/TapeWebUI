@@ -97,6 +97,10 @@ class BackupStats:
         self.state = "queued"
         self.files_total = 0
         self.files_done = 0
+        # Archive summary: tape files of kind=archive cover whole source
+        # trees, so files_total alone looks wrong in the UI.
+        self.archives_total = 0
+        self.archived_files = 0
         self.bytes_total = 0
         self.bytes_done = 0
         self.current_file = ""
@@ -133,6 +137,8 @@ class BackupStats:
             "state": self.state,
             "files_total": self.files_total,
             "files_done": self.files_done,
+            "archives": self.archives_total,
+            "archived_files": self.archived_files,
             "bytes_total": self.bytes_total,
             "bytes_done": round(estimated),
             "bytes_confirmed": self.bytes_done,
@@ -241,12 +247,13 @@ class BackupEngine:
             await self._plan_archives(definition, archive_sources, kind=kind)
         )
         plan.sort(key=lambda item: item.path)
-        if cancel_check and cancel_check():
-            raise JobCancelled("cancelled during preparation")
-
         stats.files_total = len(plan)
+        stats.archives_total = sum(1 for f in plan if f.kind == "archive")
+        stats.archived_files = sum(f.inner_count for f in plan)
         stats.bytes_total = sum(file.size for file in plan)
         await self.publish(stats)
+        if cancel_check and cancel_check():
+            raise JobCancelled("cancelled during preparation")
 
         if not plan and kind == "incremental":
             logger.info(
