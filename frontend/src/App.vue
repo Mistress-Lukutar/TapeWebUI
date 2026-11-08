@@ -69,6 +69,9 @@ onMounted(() => {
   drive.fetchStatus()
   drive.connectSse()
   runtime.connectSse()
+  // SSE only pushes on transitions; restore the current runtime (active
+  // + queued) so an F5 during waiting_media keeps the job visible.
+  void runtime.refreshRuntime()
   void runtime.refreshSchedules()
 })
 </script>
