@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.9.0
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from tapevaultui.services.session_io import (
     new_session_id,
     read_session_header,
     space_to_end_of_data,
+    timeout_for_size,
     write_filemarks,
     write_session_header,
 )
@@ -471,8 +472,14 @@ class BackupEngine:
         files_processed = 0
         bytes_written_in_pass = 0
         hard_failure: str | None = None
+        # Tape-absolute position the next write will occupy, relative to
+        # the session start. Entries whose write produced nothing on tape
+        # (damaged, skipped by EOM) share the position of the following
+        # file instead of consuming one, so catalog indexes keep matching
+        # the physical tape layout restore positions against.
+        physical_offset = 0
 
-        for offset, file in enumerate(files):
+        for _offset, file in enumerate(files):
             if cancel_check and cancel_check():
                 self._catalog.finish_session(session.id, status="failed")
                 raise JobCancelled(f"cancelled before {file.path}")
@@ -485,27 +492,48 @@ class BackupEngine:
             await self.publish(stats)
             ticker = self._start_ticker(stats)
             filemark_failure: str | None = None
+            write_error: str | None = None
             try:
-                result = await self._transport.run(["write", "-raw", "-s", write_path])
-                if result.exit_code == 0:
-                    # Delimit the tape file immediately: without a trailing
-                    # filemark the header/files merge into one giant tape
-                    # file, so BOP header reads and fsf positioning time out.
+                if file.size == 0:
+                    # ITDT rejects data-less writes: record the empty file
+                    # as a bare filemark. One filemark with no data blocks
+                    # reads back as a zero-length tape file, keeping one
+                    # tape position per session entry.
                     await write_filemarks(self._transport)
+                else:
+                    result = await self._transport.run(
+                        ["write", "-raw", "-s", write_path],
+                        timeout_s=timeout_for_size(
+                            file.size, self._transport.default_timeout_s
+                        ),
+                    )
+                    if result.exit_code == 0:
+                        # Delimit the tape file immediately: without a
+                        # trailing filemark the header/files merge into one
+                        # giant tape file, so BOP header reads and fsf
+                        # positioning time out.
+                        await write_filemarks(self._transport)
+                    else:
+                        write_error = result.stdout.strip()
             except SessionIoError as exc:
-                # The data itself landed on tape (the write succeeded), but
-                # the file boundary did not — never treated as tape-full.
-                filemark_failure = str(exc)
+                if file.size == 0:
+                    # Nothing was written: the failed filemark is the
+                    # whole (empty) tape file.
+                    write_error = str(exc)
+                else:
+                    # The data itself landed on tape (the write
+                    # succeeded), but the file boundary did not — never
+                    # treated as tape-full.
+                    filemark_failure = str(exc)
             finally:
                 _stop_ticker(ticker)
 
             catalog_mtime = datetime.fromtimestamp(file.mtime, UTC)
-            if filemark_failure is not None or result.exit_code != 0:
+            tape_file_index = session.file_base + physical_offset + 1
+            if filemark_failure is not None or write_error is not None:
                 stdout = (
-                    filemark_failure
-                    if filemark_failure is not None
-                    else result.stdout.strip()
-                )
+                    filemark_failure if filemark_failure is not None else write_error
+                ) or ""
                 # Log before classifying: the EOM branch has no other
                 # trace of the raw output, which is exactly what a
                 # misdiagnosed media failure needs for post-mortem.
@@ -519,7 +547,7 @@ class BackupEngine:
                     # retries it on the following tape as a new session.
                     self._catalog.add_file(
                         session.id,
-                        tape_file_index=session.file_base + offset + 1,
+                        tape_file_index=tape_file_index,
                         path=file.path,
                         size=file.size,
                         mtime=catalog_mtime,
@@ -536,7 +564,7 @@ class BackupEngine:
                     return files_processed
                 self._catalog.add_file(
                     session.id,
-                    tape_file_index=session.file_base + offset + 1,
+                    tape_file_index=tape_file_index,
                     path=file.path,
                     size=file.size,
                     mtime=catalog_mtime,
@@ -555,7 +583,7 @@ class BackupEngine:
 
             self._catalog.add_file(
                 session.id,
-                tape_file_index=session.file_base + offset + 1,
+                tape_file_index=tape_file_index,
                 path=file.path,
                 size=file.size,
                 mtime=catalog_mtime,
@@ -565,6 +593,7 @@ class BackupEngine:
                 inner_count=file.inner_count,
                 manifest_sha=file.manifest_sha,
             )
+            physical_offset += 1
             files_processed += 1
             stats.files_done += 1
             stats.bytes_done += file.size
@@ -605,8 +634,10 @@ class BackupEngine:
         Single sequential pass: one rewind+fsf positions the head at the
         session's first file, then every ok file is read in tape order
         (each read leaves the head at the next file) — no per-file
-        rewinds. Stops at the first failed read; damaged/skipped entries
-        occupy no tape position and consume no read.
+        rewinds. Empty ok files are spaced over instead of read: their
+        content is a bare filemark with nothing to hash. Stops at the
+        first failed read; damaged/skipped entries occupy no tape
+        position and consume no read.
 
         Publishes per-file progress (state stays ``verifying``) so the UI
         shows the phase; every damaged file increments
@@ -625,10 +656,14 @@ class BackupEngine:
         Raises:
             JobCancelled: On cancellation.
         """
-        entries = {
-            entry.tape_file_index: entry
-            for entry in self._catalog.list_files(session_id)
-        }
+        # Damaged entries share the tape index of the ok file that
+        # physically owns the position, so an ok entry must win the
+        # index — otherwise the sequential pass would skip a real tape
+        # file and desynchronize every later comparison.
+        entries: dict[int, object] = {}
+        for entry in self._catalog.list_files(session_id):
+            if entry.status == "ok" or entry.tape_file_index not in entries:
+                entries[entry.tape_file_index] = entry
         damaged = 0
         # One sequential pass: position once at the first session file,
         # then read tape file after tape file (each read leaves the head
@@ -658,8 +693,33 @@ class BackupEngine:
                 raise JobCancelled("cancelled during verification")
             stats.current_file = file.path
             await self.publish(stats)
+            if file.size == 0:
+                # Empty files are bare filemarks on tape: nothing to read
+                # back, but the position must still be consumed to keep
+                # the sequential pass aligned. Spacing over the filemark
+                # leaves the head exactly where a read would.
+                space = await self._transport.run(["fsf", "1"])
+                if space.exit_code != 0:
+                    self._catalog.mark_file_status(entry.id, "damaged")
+                    stats.hash_mismatches += 1
+                    damaged += 1
+                    logger.warning(
+                        "verify_position_failed",
+                        path=file.path,
+                        tape_index=tape_index,
+                        output=space.stdout.strip(),
+                    )
+                    # The head position is no longer trustworthy: stop the
+                    # pass instead of comparing the wrong tape files.
+                    break
+                continue
             dest = self._work_dir / f"verify_{tape_index}.bin"
-            result = await self._transport.run(["read", "-d", str(dest)])
+            result = await self._transport.run(
+                ["read", "-d", str(dest)],
+                timeout_s=timeout_for_size(
+                    file.size, self._transport.default_timeout_s
+                ),
+            )
             if result.exit_code != 0:
                 dest.unlink(missing_ok=True)
                 self._catalog.mark_file_status(entry.id, "damaged")

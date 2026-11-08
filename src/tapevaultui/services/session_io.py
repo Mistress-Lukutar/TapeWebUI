@@ -2,12 +2,13 @@
 File:   session_io.py
 Brief:  Session header (t0) read/write helpers on top of the ITDT transport.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.1
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from pathlib import Path
 
@@ -33,6 +34,32 @@ logger = structlog.get_logger(__name__)
 _BLANK_READ_MARKERS = ("blank check", "blank tape")
 # ITDT stdout fragments identifying a drive without a loaded medium.
 _NO_MEDIA_MARKERS = ("medium not present", "no media", "not ready")
+
+# Conservative throughput floor for sizing whole-file tape command
+# timeouts. Benchmark reads reach 70+ MB/s, but readback verification of
+# a large file high on the tape was observed at ~9 MB/s; assume the
+# slower rate so multi-GB files never hit the flat default timeout.
+MIN_FILE_THROUGHPUT_BPS = 5 * 1024 * 1024
+# Fixed overhead (command startup, positioning, buffering) added on top
+# of the transfer estimate.
+FILE_TIMEOUT_SLACK_S = 120
+
+
+def timeout_for_size(size_bytes: int, base_timeout_s: int) -> int:
+    """Compute a per-command timeout scaled to the transferred size.
+
+    Args:
+        size_bytes: Payload size of the write/read command in bytes.
+        base_timeout_s: Flat default timeout for small commands.
+
+    Returns:
+        ``max(base_timeout_s, transfer_estimate + slack)``; the base
+        timeout itself for zero-size payloads.
+    """
+    if size_bytes <= 0:
+        return base_timeout_s
+    transfer_s = math.ceil(size_bytes / MIN_FILE_THROUGHPUT_BPS)
+    return max(base_timeout_s, transfer_s + FILE_TIMEOUT_SLACK_S)
 
 
 class SessionIoError(RuntimeError):

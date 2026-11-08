@@ -3,7 +3,7 @@ File:   catalog.py
 Brief:  SQLite catalog repository on SQLAlchemy 2.0 (sync, thread-offloaded).
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.9.0
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -993,9 +993,12 @@ def _next_tape_file_base(session: Session, tape_id: int) -> int:
 
     The position is the sum of the physical footprints of the tape's
     live (non-erased) sessions: one filemark-delimited position for each
-    t0 header plus one per recorded source file. Erased sessions are
-    skipped because an erase wipes the whole tape, so the next session
-    starts over at position 0.
+    t0 header plus one per ``ok`` source file. Only ``ok`` entries occupy
+    a tape position: damaged and EOM-skipped files never reached the
+    tape (a filemark-failure damaged file merges into its neighbour's
+    tape file), so counting them would offset every future session from
+    the physical layout. Erased sessions are skipped because an erase
+    wipes the whole tape, so the next session starts over at position 0.
 
     Args:
         session: Active SQLAlchemy session.
@@ -1016,6 +1019,7 @@ def _next_tape_file_base(session: Session, tape_id: int) -> int:
             select(func.count(FileEntry.id)).where(
                 FileEntry.session_id == live_id,
                 FileEntry.path != SESSION_HEADER_PATH,
+                FileEntry.status == "ok",
             )
         )
         base += 1 + int(files_count or 0)

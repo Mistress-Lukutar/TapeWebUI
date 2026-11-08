@@ -3,7 +3,7 @@ File:   test_backup_engine.py
 Brief:  Backup engine tests on the fake transport (command order, verify).
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.9.0
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
 from tapevaultui.services.backup_engine import (
@@ -320,9 +322,9 @@ async def test_write_error_continue_on_error(tmp_path: Path) -> None:
 
     sessions = repo.list_sessions(repo.list_tapes()[0].id)
     files = repo.list_files(sessions[0].id)
-    statuses = {f.tape_file_index: f.status for f in files}
-    assert statuses[1] == "damaged"
-    assert statuses[2] == "ok"
+    statuses = {f.path: f.status for f in files}
+    assert statuses[str(src / "a.txt")] == "damaged"
+    assert statuses[str(src / "b.txt")] == "ok"
     assert sessions[0].status == "ok"
     assert stats.files_done == 1
 
@@ -350,6 +352,118 @@ async def test_write_error_strict_fails(tmp_path: Path) -> None:
             _definition(tmp_path, verify="none", continue_on_error=False),
             BackupStats("testjob"),
         )
+
+
+async def test_empty_file_written_as_filemark_only(tmp_path: Path) -> None:
+    """A zero-byte source becomes a bare-filemark tape file, status ok."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "empty.txt").touch()
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = await engine.execute(
+        _definition(tmp_path, verify="none"), BackupStats("testjob")
+    )
+
+    # ITDT rejects data-less writes: no write command may target the
+    # empty file; its tape file is the filemark itself.
+    write_paths = [cmd[3] for cmd in fake.commands if cmd[0] == "write"]
+    assert all("empty.txt" not in path for path in write_paths)
+    weof_commands = [cmd for cmd in fake.commands if cmd[0] == "weof"]
+    assert len(weof_commands) == 3  # header + a.txt + empty.txt
+    sessions = repo.list_sessions(repo.list_tapes()[0].id)
+    files = repo.list_files(sessions[0].id)
+    by_path = {f.path: f for f in files}
+    empty = by_path[str(src / "empty.txt")]
+    assert empty.status == "ok"
+    assert empty.size == 0
+    assert empty.tape_file_index == 2
+    assert by_path[str(src / "a.txt")].tape_file_index == 1
+    assert stats.files_done == 2
+
+
+async def test_verify_spaces_over_empty_files(tmp_path: Path) -> None:
+    """Verify reads real files and spaces over bare-filemark files."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "empty.txt").touch()
+
+    fake = FakeItDtTransport(scenarios={"read": ("AAAA", 0)})
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    verify_started = len(fake.commands) - fake.commands[::-1].index(("weof", "1"))
+    verify_commands = fake.commands[verify_started:]
+    assert verify_commands[0] == ("rewind",)
+    assert verify_commands[1] == ("fsf", "1")  # first session file
+    assert verify_commands[2][0] == "read"  # a.txt readback
+    assert verify_commands[3] == ("fsf", "1")  # over empty.txt's filemark
+    assert verify_commands[4] == ("rewind",)  # leave the pass
+    reads = [cmd for cmd in verify_commands if cmd[0] == "read"]
+    assert len(reads) == 1
+    files = repo.list_files(repo.list_sessions(repo.list_tapes()[0].id)[0].id)
+    assert {f.status for f in files} == {"ok"}
+
+
+async def test_damaged_write_shares_next_physical_index(tmp_path: Path) -> None:
+    """A failed write consumes no tape position; the next file takes it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BB")
+
+    fake = FakeItDtTransport(
+        command_scenarios={
+            ("write", "-raw", "-s", str(src / "a.txt")): ("Write failed: boom", 1)
+        }
+    )
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path, verify="none"), BackupStats("testjob"))
+
+    tape = repo.list_tapes()[0]
+    sessions = repo.list_sessions(tape.id)
+    files = repo.list_files(sessions[0].id)
+    by_path = {f.path: f for f in files}
+    damaged = by_path[str(src / "a.txt")]
+    assert damaged.status == "damaged"
+    assert damaged.tape_file_index == 1  # shares b.txt's position
+    assert by_path[str(src / "b.txt")].status == "ok"
+    assert by_path[str(src / "b.txt")].tape_file_index == 1
+    # The next session starts after the header and the one physical file.
+    second = repo.create_session(tape.id, job_name="next")
+    assert second.file_base == 2
+
+
+async def test_large_write_gets_scaled_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whole-file writes size their timeout from the payload."""
+    from tapevaultui.services import session_io
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "big.bin").write_bytes(b"x" * 1000)
+
+    # Shrink the throughput floor so a tiny file still exceeds the flat
+    # 600 s default: 1000 B at 2 B/s = 500 s + 120 s slack.
+    monkeypatch.setattr(session_io, "MIN_FILE_THROUGHPUT_BPS", 2)
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, _make_repo(), tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path, verify="none"), BackupStats("testjob"))
+
+    big_index = fake.commands.index(("write", "-raw", "-s", str(src / "big.bin")))
+    assert fake.call_timeouts[big_index] == 620
+    # The header write keeps the flat default (no override passed).
+    header_index = fake.commands.index(
+        next(cmd for cmd in fake.commands if cmd[0] == "write")
+    )
+    assert fake.call_timeouts[header_index] is None
 
 
 async def test_tape_full_without_media_callback(tmp_path: Path) -> None:

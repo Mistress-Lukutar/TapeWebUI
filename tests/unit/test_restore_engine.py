@@ -3,7 +3,7 @@ File:   test_restore_engine.py
 Brief:  Restore engine tests on the fake transport and in-memory catalog.
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.8.0
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -494,9 +494,7 @@ async def test_restore_archive_entry_extracts_tree(tmp_path: Path) -> None:
         )
     )
     # Position-aware fake: BOP read sees the header, index 1 the zip.
-    fake = FakeItDtTransport(
-        tape_files=[tape_header, zip_path.read_bytes()]
-    )
+    fake = FakeItDtTransport(tape_files=[tape_header, zip_path.read_bytes()])
     engine = RestoreEngine(fake, repo, tmp_path / "work", EventBus(), asyncio.Lock())
 
     request = RestoreRequest(
@@ -538,3 +536,41 @@ def test_build_plan_keeps_archive_kind(tmp_path: Path) -> None:
     item = plan.tapes[0].items[0]
     assert item.kind == "archive"
     assert item.inner_count == 42
+
+
+async def test_restore_recreates_empty_files_without_tape(tmp_path: Path) -> None:
+    """A zero-byte catalog entry is written out without a tape read."""
+    # The scenario read is the t0 header download: without a matching
+    # header the engine waits for the expected tape forever.
+    fake = FakeItDtTransport(scenarios={"read": (_TAPE_A_HEADER, 0)})
+    engine, repo = _make_engine(tmp_path, fake)
+    tape_row_id, _ = _seed_tape_with_files(repo, count=1)
+    session = repo.list_sessions(tape_row_id)[0]
+    empty_entry = repo.add_file(
+        session.id,
+        tape_file_index=2,
+        path="D:/Photos/placeholder/.gitkeep",
+        size=0,
+        mtime=datetime.now(UTC),
+        sha256=hashlib.sha256(b"").hexdigest(),
+    )
+    assert empty_entry is not None
+
+    request = RestoreRequest(
+        file_ids=[empty_entry.id],
+        destination_mode="alternate",
+        destination_dir=str(tmp_path / "out"),
+        collision="rename",
+    )
+    plan = engine.build_plan([empty_entry.id])
+    stats = RestoreStats(1, plan.tapes[0].tape_id)
+    final = await engine.execute(request, stats, plan, asyncio.Event())
+
+    assert final.files_done == 1
+    assert final.hash_mismatches == 0
+    restored = tmp_path / "out" / "Photos" / "placeholder" / ".gitkeep"
+    assert restored.exists()
+    assert restored.stat().st_size == 0
+    # No positioning or data read was issued for the empty file: only
+    # the tape-identification header read touches the drive.
+    assert not [cmd for cmd in fake.commands if cmd[0] == "fsf"]

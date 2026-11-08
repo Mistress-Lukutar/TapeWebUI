@@ -2,8 +2,8 @@
 File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -108,6 +108,11 @@ class ItDtTransport:
         self._default_timeout_s = default_timeout_s
         self._open_retry_s = open_retry_s
         self._open_retries = open_retries
+
+    @property
+    def default_timeout_s(self) -> int:
+        """Current flat default timeout for one ITDT command (seconds)."""
+        return self._default_timeout_s
 
     async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
         """Run one ITDT command to completion.
@@ -293,6 +298,10 @@ class FakeItDtTransport:
         self.tape_files = tape_files
         self.position = 0
         self.commands: list[tuple[str, ...]] = []
+        # Timeout override recorded per command (None = default), parallel
+        # to ``commands``; lets tests assert size-scaled timeout sizing.
+        self.call_timeouts: list[int | None] = []
+        self.default_timeout_s = 600
         self.device_name = "\\\\.\\tape0"
 
     def build_args(self, args: list[str] | tuple[str, ...]) -> list[str]:
@@ -339,6 +348,7 @@ class FakeItDtTransport:
             ItDtResult built from the scenario table.
         """
         self.commands.append(tuple(args))
+        self.call_timeouts.append(timeout_s)
         key = tuple(args)
         if key in self.command_scenarios:
             stdout, exit_code = self.command_scenarios[key]

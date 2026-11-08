@@ -3,7 +3,7 @@ File:   restore_engine.py
 Brief:  Restore engine: plan, single-pass tape read, hash-checked write-out.
 Author: Mistress-Lukutar
 Date:   2026-11-08
-Version: v0.8.0
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from tapevaultui.services.event_bus import EventBus
 from tapevaultui.services.session_io import (
     SessionIoError,
     read_session_header,
+    timeout_for_size,
 )
 from tapevaultui.services.snapshot import sha256_of
 from tapevaultui.services.tape_format import TapeFormatError
@@ -546,13 +547,29 @@ class RestoreEngine:
         stats.current_file = item.path
         await self._publish(stats)
 
+        if item.size == 0 and item.kind != "archive":
+            # Empty source files live on tape as bare filemarks with no
+            # readable data: recreate the zero-byte file locally instead
+            # of issuing a tape read. No position is consumed; every
+            # later item repositions absolutely anyway.
+            target = self._target_path(item.path, request)
+            if target is None:
+                return  # collision policy: skip
+            await asyncio.to_thread(target.write_bytes, b"")
+            stats.files_done += 1
+            stats.bytes_done += item.size
+            return
+
         dest = self._work_dir / f"restore_{uuid.uuid4().hex[:8]}.bin"
         # Absolute positioning: space from BOP over the file index.
         # Relative spacing after a previous read drifts whenever a
         # skipped/failed file shifts the position.
         await self._transport.run(["rewind"])
         await self._transport.run(["fsf", str(item.tape_file_index)])
-        result = await self._transport.run(["read", "-d", str(dest)])
+        result = await self._transport.run(
+            ["read", "-d", str(dest)],
+            timeout_s=timeout_for_size(item.size, self._transport.default_timeout_s),
+        )
         if result.exit_code != 0:
             stats.hash_mismatches += 1
             logger.warning("restore_read_failed", path=item.path)
@@ -571,9 +588,7 @@ class RestoreEngine:
                 if target is None:
                     return  # collision policy: skip
                 try:
-                    extracted = await asyncio.to_thread(
-                        extract_archive, dest, target
-                    )
+                    extracted = await asyncio.to_thread(extract_archive, dest, target)
                 except ArchiveError as exc:
                     logger.warning(
                         "restore_archive_failed", path=item.path, error=str(exc)

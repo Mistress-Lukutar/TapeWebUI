@@ -2,8 +2,8 @@
 File:   test_session_io.py
 Brief:  Session header I/O helper tests on the fake transport.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-08
+Version: v0.9.1
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from tapevaultui.services.session_io import (
     read_session_header,
     space_forward_files,
     space_to_end_of_data,
+    timeout_for_size,
     write_filemarks,
     write_session_header,
 )
@@ -193,3 +194,16 @@ def test_header_file_entry_validation() -> None:
         HeaderFileEntry(
             seq=0, path="x", size=-1, mtime=0.0, sha256="0" * 64, tape_file_index=0
         )
+
+
+def test_timeout_for_size_scales_with_payload() -> None:
+    """Small payloads keep the flat default; large ones get extra budget."""
+    base = 600
+    assert timeout_for_size(0, base) == base  # nothing to transfer
+    assert timeout_for_size(1024, base) == base  # far below the estimate
+    # 10 MiB at 5 MiB/s = 2 s transfer + 120 s slack, still under base.
+    assert timeout_for_size(10 * 1024 * 1024, base) == base
+    # 10 GiB at 5 MiB/s = 2048 s transfer + 120 s slack.
+    assert timeout_for_size(10 * 1024 * 1024 * 1024, base) == 2168
+    # A custom base above the estimate is kept.
+    assert timeout_for_size(1024, 3000) == 3000
