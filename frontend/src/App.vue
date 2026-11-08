@@ -9,6 +9,7 @@ import Restore from './pages/Restore.vue'
 import History from './pages/History.vue'
 import Settings from './pages/Settings.vue'
 import Service from './pages/Service.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 
 type Page = 'dashboard' | 'jobs' | 'tapes' | 'restore' | 'history' | 'settings' | 'service'
 
@@ -211,4 +212,5 @@ onMounted(() => {
       <main v-else-if="page === 'service'"><Service /></main>
     </div>
   </div>
+  <ConfirmDialog />
 </template>

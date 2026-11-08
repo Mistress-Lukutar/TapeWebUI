@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiGet, apiSend, formatBytes, formatIso } from '../api'
+import { useConfirm } from '../composables/useConfirm'
 
 interface Tape {
   id: number
@@ -11,6 +12,7 @@ interface Tape {
   created_at: string
   notes: string
   last_verified_at: string | null
+  adoption_pending?: boolean
 }
 
 interface Session {
@@ -78,6 +80,7 @@ interface StaleNotice {
   at: string
 }
 
+const { confirm } = useConfirm()
 const tapes = ref<Tape[]>([])
 const details = ref<TapeDetails | null>(null)
 const files = ref<FileRow[]>([])
@@ -135,7 +138,14 @@ async function markSessionsErased(sessionIds: number[]): Promise<void> {
   if (!verifyResult.value?.report || !sessionIds.length) return
   const tapeId = verifyResult.value.report.tape_id
   if (tapeId === null) return
-  if (!window.confirm(`Mark ${sessionIds.length} session(s) erased in the catalog?`))
+  if (
+    !(await confirm({
+      title: 'Mark sessions erased',
+      message: `Mark ${sessionIds.length} session(s) erased in the catalog?`,
+      confirmLabel: 'Mark erased',
+      danger: true,
+    }))
+  )
     return
   error.value = ''
   applying.value = true
@@ -187,9 +197,60 @@ async function search(): Promise<void> {
 }
 
 async function markErased(tape: Tape): Promise<void> {
-  if (!window.confirm(`Mark all sessions of ${tape.label || tape.uuid} erased?`)) return
+  const ok = await confirm({
+    title: 'Mark tape erased',
+    message: `Mark all sessions of ${tape.label || tape.uuid} erased?`,
+    confirmLabel: 'Mark erased',
+    danger: true,
+  })
+  if (!ok) return
   await fetch(`/api/tapes/${tape.id}/erase-mark`, { method: 'POST' })
   await load()
+}
+
+async function deleteTape(tape: Tape): Promise<void> {
+  const ok = await confirm({
+    title: 'Delete catalog record',
+    message: `Delete catalog record ${tape.label || tape.uuid} with all its session history? Only erased tapes can be deleted.`,
+    confirmLabel: 'Delete',
+    danger: true,
+  })
+  if (!ok) return
+  error.value = ''
+  try {
+    await apiSend(`/api/tapes/${tape.id}`, 'DELETE')
+    tapes.value = tapes.value.filter((item) => item.id !== tape.id)
+    if (details.value?.id === tape.id) details.value = null
+  } catch (err) {
+    error.value = String(err)
+  }
+}
+
+async function adoptTape(tape: Tape): Promise<void> {
+  const ok = await confirm({
+    title: 'Adopt tape',
+    message: `Adopt the blank tape currently in the drive into record ${tape.label || tape.uuid}? The drive must hold an erased (blank) cartridge: the next backup write will reuse this record, keeping its label and session history.`,
+    confirmLabel: 'Adopt',
+  })
+  if (!ok) return
+  error.value = ''
+  try {
+    const updated = await apiSend<Tape>(`/api/tapes/${tape.id}/adopt`, 'POST')
+    tapes.value = tapes.value.map((item) => (item.id === updated.id ? updated : item))
+    if (details.value?.id === updated.id) details.value = null
+  } catch (err) {
+    error.value = String(err)
+  }
+}
+
+async function cancelAdoption(tape: Tape): Promise<void> {
+  error.value = ''
+  try {
+    await apiSend<Tape>(`/api/tapes/${tape.id}/adopt`, 'DELETE')
+    await load()
+  } catch (err) {
+    error.value = String(err)
+  }
 }
 
 const renamingId = ref<number | null>(null)
@@ -281,7 +342,10 @@ onMounted(() => {
                 @keyup.enter="saveRename(tape)"
                 @keyup.esc="renamingId = null"
               />
-              <a v-else href="#" @click.prevent="open(tape)">{{ tape.label || tape.uuid.slice(0, 8) }}</a>
+              <a v-else href="#" @click.prevent="open(tape)">
+                {{ tape.label || tape.uuid.slice(0, 8) }}
+                <span v-if="tape.adoption_pending" class="dim" title="Next blank tape in the drive will reuse this record">⌂ adopt</span>
+              </a>
             </td>
             <td>{{ tape.status }}</td>
             <td>{{ formatBytes(tape.bytes_used) }}</td>
@@ -294,7 +358,28 @@ onMounted(() => {
               </template>
               <template v-else>
                 <button @click="startRename(tape)">Rename</button>
+                <button
+                  v-if="tape.adoption_pending"
+                  title="Cancel the pending adoption for this record"
+                  @click="cancelAdoption(tape)"
+                >
+                  Cancel adopt
+                </button>
+                <button
+                  v-else
+                  title="Reuse this record for a blank (erased) tape currently in the drive"
+                  @click="adoptTape(tape)"
+                >
+                  Adopt tape
+                </button>
                 <button class="danger" @click="markErased(tape)">Erase-mark</button>
+                <button
+                  class="danger"
+                  title="Delete this record and its erased session history from the catalog"
+                  @click="deleteTape(tape)"
+                >
+                  Delete
+                </button>
               </template>
             </td>
           </tr>

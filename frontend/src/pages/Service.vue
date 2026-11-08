@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiGet, apiSend, formatIso } from '../api'
+import { useConfirm } from '../composables/useConfirm'
 
 interface StatisticsResponse {
   reachable: boolean
@@ -86,6 +87,7 @@ const STAT_LABELS: Record<string, string> = {
   drive_sn: 'Drive serial',
 }
 
+const { confirm } = useConfirm()
 const stats = ref<StatisticsResponse | null>(null)
 const loading = ref(false)
 const running = ref('')
@@ -164,7 +166,16 @@ async function loadOpsState(): Promise<void> {
 }
 
 async function runOp(def: OpDef): Promise<void> {
-  if (def.confirm && !window.confirm(def.confirm)) return
+  if (
+    def.confirm &&
+    !(await confirm({
+      title: def.label || def.op,
+      message: def.confirm,
+      confirmLabel: 'Run',
+      danger: def.danger,
+    }))
+  )
+    return
   running.value = def.op
   error.value = ''
   try {
