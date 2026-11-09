@@ -3,11 +3,12 @@ File:   archive_builder.py
 Brief:  Archive sources: content manifest, staged zip cache, skip/rebuild.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.2
+Version: v0.11.3
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import shutil
 import time
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 import pathspec
 import structlog
@@ -44,6 +46,108 @@ class ArchiveError(RuntimeError):
     """Raised when an archive cannot be planned, built, or extracted."""
 
 
+class _HashingWriter:
+    """O(1)-memory streaming SHA-256 hasher for zip file bytes.
+
+    Wraps a raw ``BinaryIO`` and feeds every ``write()`` through
+    ``hashlib.sha256.update()`` so the digest covers all bytes emitted
+    by ``zipfile`` (local headers, data, central directory, EOCD).
+    Hashing during the build write pass removes the second full read
+    of the built zip — previously ``_build_zip`` wrote to a temp file,
+    closed it, then re-read the entire file for ``sha256_of()``.
+
+    ``tell()`` raises ``OSError``, which CPython 3.11 and 3.13's
+    ``ZipFile.__init__`` both catch in the same branch:
+    ``self.fp = _Tellable(self.fp); self.start_dir = 0; self._seekable = False``.
+    (CPython 3.13.14 additionally probes ``seek()`` and also raises,
+    but that is a no-op since ``_seekable`` is already ``False``.)
+
+    The ``_Tellable`` proxy counts write lengths for tell(), so the
+    write stream is purely sequential with data-descriptor layout
+    (flag bit 0x8): local headers carry CRC/size placeholders and
+    descriptors are appended after each entry's data. No seek-back
+    rewrite occurs, so digest matches ``sha256_of(final file)`` exactly.
+
+    Memory usage is O(1): a single ``hashlib.sha256`` context plus the
+    raw stream buffer — no per-byte accumulation.
+
+    ``close`` forwards to the underlying stream (zipfile calls it in its
+    ``__exit__``).
+
+    Attributes:
+        hexdigest: SHA-256 hex string of all bytes written.
+    """
+
+    def __init__(self, raw: BinaryIO) -> None:
+        """Wrap *raw* and initialise a fresh SHA-256 digest.
+
+        Args:
+            raw: Underlying binary stream receiving the zip bytes.
+        """
+        self._raw = raw
+        self._digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        """Digest *data* and forward it to the wrapped stream.
+
+        Args:
+            data: Bytes to write through the wrapper.
+
+        Returns:
+            Number of bytes written (from the underlying stream).
+        """
+        self._digest.update(data)
+        return self._raw.write(data)
+
+    def tell(self) -> int:
+        """Raise — triggers zipfile's non-seekable probe in ``__init__``.
+
+        Returns:
+            Never returns; raises ``OSError`` on every call.
+
+        Raises:
+            OSError: Always — detected by ``ZipFile.__init__`` which
+                wraps the stream in ``_Tellable`` (data-descriptor mode).
+        """
+        raise OSError("HashingWriter is non-seekable")
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """Raise — safety net; never reached in data-descriptor mode.
+
+        Args:
+            offset: Byte offset.
+            whence: Seek mode (default 0 = absolute).
+
+        Returns:
+            New position in the underlying stream.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("HashingWriter is non-seekable")
+
+    def seekable(self) -> bool:
+        """Return ``False`` — documentation of non-seekable intent."""
+        return False
+
+    def flush(self) -> None:
+        """Forward ``flush()`` to the wrapped stream."""
+        self._raw.flush()
+
+    def close(self) -> None:
+        """Close the underlying raw stream (forwarded from zipfile)."""
+        self._raw.close()
+
+    @property
+    def hexdigest(self) -> str:
+        """SHA-256 hex digest of all bytes written through this wrapper.
+
+        Returns:
+            64-character lowercase hex string.
+        """
+        return self._digest.hexdigest()
+
+
 class ArchiveManifest:
     """Content manifest of one archive source.
 
@@ -56,15 +160,19 @@ class ArchiveManifest:
         self,
         entries: dict[str, tuple[int, float, str]],
         manifest_sha: str,
+        zip_sha256: str | None = None,
     ) -> None:
         """Store the entries and their content hash.
 
         Args:
             entries: Mapping relative path -> (size, mtime, sha256).
             manifest_sha: Content hash over the sorted entries.
+            zip_sha256: SHA-256 of the built zip file bytes; None for
+                legacy manifests that lack this field.
         """
         self.entries = entries
         self.manifest_sha = manifest_sha
+        self.zip_sha256 = zip_sha256
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> ArchiveManifest:
@@ -82,9 +190,13 @@ class ArchiveManifest:
         try:
             payload = json.loads(raw.decode("utf-8"))
             entries = payload["entries"]
+            zip_sha256 = payload.get("zip_sha256")
+            if not isinstance(zip_sha256, str):
+                zip_sha256 = None
             return cls(
                 {k: (v[0], v[1], v[2]) for k, v in entries.items()},
                 payload["manifest_sha"],
+                zip_sha256,
             )
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise ArchiveError(f"Corrupt archive manifest: {exc}") from exc
@@ -96,7 +208,11 @@ class ArchiveManifest:
             Compact JSON with sorted keys (stable manifest_sha).
         """
         return json.dumps(
-            {"entries": self.entries, "manifest_sha": self.manifest_sha},
+            {
+                "entries": self.entries,
+                "manifest_sha": self.manifest_sha,
+                "zip_sha256": self.zip_sha256,
+            },
             sort_keys=True,
         ).encode("utf-8")
 
@@ -186,7 +302,7 @@ def _build_zip(
     root: Path,
     entries: dict[str, tuple[int, float, str]],
     zip_path: Path,
-) -> int:
+) -> tuple[int, str]:
     """Write the staged zip for the given content set.
 
     Entries are written in sorted order with per-file mtimes restored
@@ -196,17 +312,26 @@ def _build_zip(
     temp file replaces the cache atomically so a crashed build never
     corrupts the cache; a failed build deletes its partial temp file.
 
+    A ``_HashingWriter`` (non-seekable) wraps the output stream, forcing
+    zipfile's data-descriptor layout (flag 0x8): CRC and sizes are written
+    as placeholders in local headers then appended after each entry's data.
+    The write stream is purely sequential so SHA-256 over every ``write()``
+    equals ``sha256_of(final file)`` with O(1) memory. The digest is
+    returned alongside the file size so callers avoid a second full read.
+
     Args:
         root: Source root directory the relative paths resolve against.
         entries: Mapping relative path -> (size, mtime, sha256).
         zip_path: Destination zip file path.
 
     Returns:
-        The zip file size in bytes.
+        Tuple of (zip file size in bytes, sha256 hex of the written zip).
     """
     tmp_path = zip_path.with_suffix(".zip.tmp")
     try:
-        with zipfile.ZipFile(tmp_path, "w", compression=ZIP_COMPRESSION) as zf:
+        raw = tmp_path.open("wb")
+        writer = _HashingWriter(raw)
+        with zipfile.ZipFile(writer, "w", compression=ZIP_COMPRESSION) as zf:
             for relative in sorted(entries):
                 size, mtime, _sha = entries[relative]
                 info = zipfile.ZipInfo(
@@ -225,11 +350,14 @@ def _build_zip(
                     zf.open(info, mode="w") as entry,
                 ):
                     shutil.copyfileobj(handle, entry, length=16 * 1024 * 1024)
+        raw.close()
         os.replace(tmp_path, zip_path)
     except BaseException:
+        with contextlib.suppress(Exception):
+            raw.close()
         tmp_path.unlink(missing_ok=True)
         raise
-    return zip_path.stat().st_size
+    return (zip_path.stat().st_size, writer.hexdigest)
 
 
 def plan_archive_source(
@@ -248,6 +376,12 @@ def plan_archive_source(
     full run an unchanged archive is not rebuilt — the cached zip is
     reused — but a PlannedFile is still returned so the data lands on
     the new tape.
+
+    The built zip's SHA-256 is stored in the sidecar manifest alongside
+    the content manifest, eliminating a second full read of the zip on
+    every run. On cache hits the stored hash is reused directly; legacy
+    manifests (v0.11.2 and earlier) that lack ``zip_sha256`` trigger a
+    one-time backfill so subsequent runs also skip the read.
 
     Args:
         source: Archive source definition (archive=True).
@@ -293,18 +427,34 @@ def plan_archive_source(
         return None
 
     reuse = False
+    zip_sha256: str | None = None
+    cached_manifest: ArchiveManifest | None = None
     if manifest_path.exists() and zip_path.exists():
         try:
-            cached = ArchiveManifest.from_bytes(manifest_path.read_bytes())
-            reuse = cached.manifest_sha == manifest_sha
+            cached_manifest = ArchiveManifest.from_bytes(manifest_path.read_bytes())
+            reuse = cached_manifest.manifest_sha == manifest_sha
         except ArchiveError:
             reuse = False
     if reuse:
+        assert cached_manifest is not None  # set in try block when reuse=True
         zip_size = zip_path.stat().st_size
+        if isinstance(cached_manifest.zip_sha256, str):
+            zip_sha256 = cached_manifest.zip_sha256
+        else:
+            # Legacy manifest — compute once and backfill.
+            zip_sha256 = sha256_of(zip_path)
+            new_manifest = ArchiveManifest(
+                cached_manifest.entries,
+                cached_manifest.manifest_sha,
+                zip_sha256,
+            ).serialize()
+            manifest_path.write_bytes(new_manifest)
         logger.info("archive_cache_reused", path=str(root), size=zip_size)
     else:
-        zip_size = _build_zip(root, entries, zip_path)
-        manifest_path.write_bytes(ArchiveManifest(entries, manifest_sha).serialize())
+        zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
+        manifest_path.write_bytes(
+            ArchiveManifest(entries, manifest_sha, zip_sha256).serialize()
+        )
         logger.info("archive_built", path=str(root), size=zip_size, files=len(entries))
 
     stat = zip_path.stat()
@@ -312,7 +462,7 @@ def plan_archive_source(
         path=str(root),
         size=zip_size,
         mtime=stat.st_mtime,
-        sha256=sha256_of(zip_path),
+        sha256=zip_sha256,
         staging_path=str(zip_path),
         kind="archive",
         inner_count=len(entries),

@@ -4,14 +4,16 @@ Brief:  Archive source tests: manifest, staged zip cache, skip/rebuild,
         extraction roundtrip.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.2
+Version: v0.11.3
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,33 @@ from tapevaultui.services.archive_builder import (
 )
 from tapevaultui.services.job_defs import SourceDef
 from tapevaultui.services.snapshot import SnapshotError, sha256_of
+
+
+def _counting_sha256_of(
+    real_fn: Callable[[Path], str], monkeypatch: pytest.MonkeyPatch
+) -> list[Path]:
+    """Record every ``sha256_of`` call path in both patched modules.
+
+    ``_walk_source`` imports ``sha256_of`` at module level from
+    ``tapevaultui.services.snapshot``, so patching only
+    ``archive_builder.sha256_of`` misses calls inside the walk.
+
+    Args:
+        real_fn: The original ``sha256_of`` function.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        List of paths passed to ``sha256_of`` during the patch.
+    """
+    calls: list[Path] = []
+
+    def counting(path: Path) -> str:
+        calls.append(Path(path))
+        return real_fn(path)
+
+    monkeypatch.setattr("tapevaultui.services.snapshot.sha256_of", counting)
+    monkeypatch.setattr("tapevaultui.services.archive_builder.sha256_of", counting)
+    return calls
 
 
 def _source(tmp_path: Path, archive: bool = True) -> SourceDef:
@@ -375,9 +404,144 @@ def test_build_zip_enables_zip64_for_large_entries(
     entries = {"big.bin": (len(expected), (src / "big.bin").stat().st_mtime, "sha:x")}
     zip_path = tmp_path / "staging" / "cache.zip"
     zip_path.parent.mkdir()  # plan_archive_source ensures this in prod
-    size = _build_zip(src, entries, zip_path)
+    size, zip_sha = _build_zip(src, entries, zip_path)
 
     assert size > 0
+    assert zip_sha == sha256_of(zip_path)
     with zipfile.ZipFile(zip_path) as zf:
         assert zf.getinfo("big.bin").file_size == len(expected)
         assert zf.read("big.bin") == expected
+
+
+def test_plan_build_stores_zip_sha_in_manifest(tmp_path: Path) -> None:
+    """A fresh build writes the zip SHA-256 into the sidecar manifest."""
+    _make_tree(tmp_path)
+    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    assert entry is not None
+
+    # Parse the staging manifest JSON and verify zip_sha256 matches.
+    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
+    assert len(manifest_files) == 1
+    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
+    assert parsed.zip_sha256 is not None
+    assert parsed.zip_sha256 == entry.sha256
+    assert parsed.zip_sha256 == sha256_of(Path(entry.staging_path))
+
+
+def test_plan_reuse_uses_stored_hash_without_reading_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached-reuse path returns the stored hash without re-reading the zip."""
+    _make_tree(tmp_path)
+    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    assert first is not None
+
+    # Tamper with the zip bytes while leaving the manifest intact.
+    zip_path = Path(first.staging_path)
+    zip_path.write_bytes(b"tampered")
+
+    # Record every sha256_of call — reuse must NOT read the zip.
+    calls = _counting_sha256_of(sha256_of, monkeypatch)
+
+    second = plan_archive_source(
+        _source(tmp_path),
+        staging_dir=tmp_path / "staging",
+        written_manifest_sha=first.manifest_sha,
+        write_even_if_unchanged=True,
+    )
+    assert second is not None
+    # Returned sha must be the stored hash (first.sha256), NOT the tampered file's.
+    assert second.sha256 == first.sha256
+    # Sanity: the tampered zip hashes differently, proving we got the original.
+    assert second.sha256 != sha256_of(Path(second.staging_path))
+    # The zip path was never passed to sha256_of during reuse.
+    assert Path(first.staging_path) not in calls
+
+
+def test_plan_legacy_manifest_backfills_zip_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy manifest (no zip_sha256 key) triggers one-time backfill."""
+    _make_tree(tmp_path)
+    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    assert first is not None
+
+    # Rewrite the manifest as LEGACY bytes — manually omit zip_sha256.
+    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
+    assert len(manifest_files) == 1
+    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
+    legacy_json = json.dumps(
+        {"entries": parsed.entries, "manifest_sha": parsed.manifest_sha}
+    ).encode("utf-8")
+    manifest_files[0].write_bytes(legacy_json)
+
+    # Plan again — reuse path should detect legacy and backfill.
+    calls = _counting_sha256_of(sha256_of, monkeypatch)
+    second = plan_archive_source(
+        _source(tmp_path),
+        staging_dir=tmp_path / "staging",
+        written_manifest_sha=first.manifest_sha,
+        write_even_if_unchanged=True,
+    )
+    assert second is not None
+    # The fallback computed the real zip hash.
+    expected_hash = sha256_of(Path(first.staging_path))
+    assert second.sha256 == expected_hash
+
+    # Manifest file now contains the backfilled zip_sha256.
+    re_parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
+    assert re_parsed.zip_sha256 == expected_hash
+
+    # The legacy path triggered exactly one sha256_of of the zip (the backfill).
+    assert calls.count(Path(first.staging_path)) == 1
+
+    # Overwrite zip bytes again and verify subsequent reuse does NOT call sha256_of.
+    Path(first.staging_path).write_bytes(b"tampered")
+
+    calls2 = _counting_sha256_of(sha256_of, monkeypatch)
+
+    third = plan_archive_source(
+        _source(tmp_path),
+        staging_dir=tmp_path / "staging",
+        written_manifest_sha=re_parsed.manifest_sha,
+        write_even_if_unchanged=True,
+    )
+    assert third is not None
+    assert third.sha256 == expected_hash  # backfilled hash reused
+    # After backfill the stored hash is used — zip path never read again.
+    assert Path(first.staging_path) not in calls2
+
+
+def test_archive_manifest_zip_sha_roundtrip_and_legacy_parse() -> None:
+    """ArchiveManifest serialises with zip_sha256; legacy parses as None."""
+    entries = {
+        "a.txt": (4, 1700000000.0, "f" * 64),
+        "nested/b.txt": (2, 1700000001.0, "0" * 64),
+    }
+    digest = manifest_digest(entries)
+    zip_sha = "a" * 64
+
+    manifest = ArchiveManifest(entries, digest, zip_sha)
+    roundtrip = ArchiveManifest.from_bytes(manifest.serialize())
+    assert roundtrip.zip_sha256 == zip_sha
+    assert roundtrip.entries == entries
+    assert roundtrip.manifest_sha == digest
+
+    # The serialized JSON contains the key.
+    payload = json.loads(manifest.serialize().decode("utf-8"))
+    assert "zip_sha256" in payload
+    assert payload["zip_sha256"] == zip_sha
+
+    # Legacy JSON without the key parses as None.
+    legacy_bytes = json.dumps(
+        {"entries": entries, "manifest_sha": digest}
+    ).encode("utf-8")
+    legacy_parsed = ArchiveManifest.from_bytes(legacy_bytes)
+    assert legacy_parsed.zip_sha256 is None
+
+    # Non-string zip_sha256 values are coerced to None.
+    bad_bytes = json.dumps(
+        {"entries": entries, "manifest_sha": digest, "zip_sha256": 123}
+    ).encode("utf-8")
+    bad_parsed = ArchiveManifest.from_bytes(bad_bytes)
+    assert bad_parsed.zip_sha256 is None

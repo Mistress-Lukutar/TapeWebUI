@@ -17,6 +17,7 @@ import pytest
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
 from tapevaultui.services.backup_engine import (
     BackupEngine,
+    BackupEngineError,
     BackupStats,
     TapeFullError,
 )
@@ -729,14 +730,16 @@ def _archive_definition(
     backup_type: str = "full",
     verify: str = "none",
     extra_plain: bool = False,
+    extra_archive: str | None = None,
 ) -> JobDefinition:
-    """Build a job with one archive source (+ optional plain source).
+    """Build a job with one archive source (+ optional plain/archive sources).
 
     Args:
         tmp_path: Pytest temp dir holding the source tree.
         backup_type: full | incremental.
         verify: Verify option value.
         extra_plain: Add a second plain (non-archive) source.
+        extra_archive: Path string for an additional archive source.
 
     Returns:
         A JobDefinition.
@@ -746,6 +749,8 @@ def _archive_definition(
     ]
     if extra_plain:
         sources.append({"path": str(tmp_path / "plain")})
+    if extra_archive is not None:
+        sources.append({"path": extra_archive, "archive": True})
     return JobDefinition.model_validate(
         {
             "name": "testjob",
@@ -892,6 +897,65 @@ async def test_mixed_sources_write_plain_and_archive(tmp_path: Path) -> None:
     kinds = {entry.path: entry.kind for entry in files}
     assert kinds[str(plain / "p.txt")] == "file"
     assert kinds[str(src)] == "archive"
+
+
+async def test_archive_missing_source_continues_on_error(tmp_path: Path) -> None:
+    """A missing archive source is skipped when continue_on_error=True."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(
+        _archive_definition(tmp_path, extra_archive=str(tmp_path / "nonexistent")),
+        stats,
+    )
+
+    assert stats.state == "writing"  # completed without raising
+    assert stats.archives_total == 1  # only the existing source planned
+
+
+async def test_archive_missing_source_aborts_without_continue(
+    tmp_path: Path,
+) -> None:
+    """A missing archive source raises when continue_on_error=False."""
+    import re
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+
+    missing_path = str(tmp_path / "nonexistent")
+    with pytest.raises(BackupEngineError, match=re.escape(missing_path)):
+        await engine.execute(
+            JobDefinition.model_validate(
+                {
+                    "name": "testjob",
+                    "sources": [
+                        {"path": str(tmp_path / "src"), "archive": True},
+                        {"path": missing_path, "archive": True},
+                    ],
+                    "options": {
+                        "mode": "append",
+                        "verify": "none",
+                        "continue_on_error": False,
+                        "backup_type": "full",
+                        "full_every_days": 30,
+                    },
+                }
+            ),
+            BackupStats("testjob"),
+        )
+
+    # No session was written because planning failed before tape I/O.
+    assert len(repo.list_tapes()) == 0
 
 
 def test_looks_like_eom_word_boundaries() -> None:

@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.2
+Version: v0.11.3
 """
 
 from __future__ import annotations
@@ -432,12 +432,14 @@ class BackupEngine:
     ) -> list[PlannedFile]:
         """Plan the archive sources into staged zip entries.
 
-        Each source is planned in a worker thread (hash-all content
-        walk). An incremental run skips a source whose manifest hash
-        matches the newest archive already written; a full run reuses
-        the cached zip without rebuilding but still writes it. Failures
-        follow ``continue_on_error``: unreadable sources are logged and
-        skipped, otherwise the error aborts the run.
+        Sources are planned concurrently with a bound of 3 worker
+        threads (hash-all content walk). An incremental run skips a
+        source whose manifest hash matches the newest archive already
+        written; a full run reuses the cached zip without rebuilding but
+        still writes it. Failures follow ``continue_on_error``:
+        unreadable sources are logged and skipped, otherwise the error
+        aborts the run. Per-source error semantics are unchanged from
+        the serial implementation.
 
         Args:
             definition: The job being executed.
@@ -456,32 +458,42 @@ class BackupEngine:
             if kind == "incremental"
             else {}
         )
-        planned: list[PlannedFile] = []
-        for source in archive_sources:
-            _, manifest_sha = written.get(source.path, ("", ""))
-            try:
-                entry = await asyncio.to_thread(
-                    plan_archive_source,
-                    source,
-                    staging_dir=self._staging_dir,
-                    written_manifest_sha=manifest_sha or None,
-                    write_even_if_unchanged=kind == "full",
-                )
-            except Exception as exc:
-                if definition.options.continue_on_error:
-                    # repr, not str: message-less exceptions (MemoryError,
-                    # TimeoutError) would log an empty error field.
-                    logger.warning(
-                        "archive_source_failed",
-                        path=source.path,
-                        error=repr(exc),
+        semaphore = asyncio.Semaphore(3)
+
+        async def _plan_one(source: SourceDef) -> PlannedFile | None:
+            async with semaphore:
+                _, manifest_sha = written.get(source.path, ("", ""))
+                try:
+                    return await asyncio.to_thread(
+                        plan_archive_source,
+                        source,
+                        staging_dir=self._staging_dir,
+                        written_manifest_sha=manifest_sha or None,
+                        write_even_if_unchanged=kind == "full",
                     )
-                    continue
-                raise BackupEngineError(
-                    f"Archive source failed: {source.path}: {exc}"
-                ) from exc
-            if entry is not None:
-                planned.append(entry)
+                except Exception as exc:
+                    if definition.options.continue_on_error:
+                        # repr, not str: message-less exceptions (MemoryError,
+                        # TimeoutError) would log an empty error field.
+                        logger.warning(
+                            "archive_source_failed",
+                            path=source.path,
+                            error=repr(exc),
+                        )
+                        return None
+                    raise BackupEngineError(
+                        f"Archive source failed: {source.path}: {exc}"
+                    ) from exc
+
+        results = await asyncio.gather(
+            *(_plan_one(source) for source in archive_sources), return_exceptions=True
+        )
+        planned: list[PlannedFile] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            if result is not None:
+                planned.append(result)
         return planned
 
     async def _write_tape_pass(
