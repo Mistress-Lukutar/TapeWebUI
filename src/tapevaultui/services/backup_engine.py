@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.1
+Version: v0.11.2
 """
 
 from __future__ import annotations
@@ -469,10 +469,12 @@ class BackupEngine:
                 )
             except Exception as exc:
                 if definition.options.continue_on_error:
+                    # repr, not str: message-less exceptions (MemoryError,
+                    # TimeoutError) would log an empty error field.
                     logger.warning(
                         "archive_source_failed",
                         path=source.path,
-                        error=str(exc),
+                        error=repr(exc),
                     )
                     continue
                 raise BackupEngineError(

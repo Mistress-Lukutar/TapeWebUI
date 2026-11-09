@@ -2,8 +2,8 @@
 File:   archive_builder.py
 Brief:  Archive sources: content manifest, staged zip cache, skip/rebuild.
 Author: Mistress-Lukutar
-Date:   2026-11-08
-Version: v0.8.0
+Date:   2026-11-09
+Version: v0.11.2
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -131,9 +132,7 @@ def _source_slug(source_path: str) -> str:
     return f"{leaf}_{hashlib.sha256(source_path.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _walk_source(
-    root: Path, source: SourceDef
-) -> dict[str, tuple[int, float, str]]:
+def _walk_source(root: Path, source: SourceDef) -> dict[str, tuple[int, float, str]]:
     """Walk one archive source and hash every included file.
 
     Excludes/patterns behave exactly like the plain snapshot walk
@@ -148,9 +147,7 @@ def _walk_source(
         Mapping relative posix path -> (size, mtime, sha256).
     """
     spec = (
-        pathspec.GitIgnoreSpec.from_lines(source.excludes)
-        if source.excludes
-        else None
+        pathspec.GitIgnoreSpec.from_lines(source.excludes) if source.excludes else None
     )
     entries: dict[str, tuple[int, float, str]] = {}
     for file_path in sorted(_iter_unignored(root, spec)):
@@ -193,8 +190,11 @@ def _build_zip(
     """Write the staged zip for the given content set.
 
     Entries are written in sorted order with per-file mtimes restored
-    (deterministic bytes for identical content). The temp file replaces
-    the cache atomically so a crashed build never corrupts the cache.
+    (deterministic bytes for identical content). File bytes are STREAMED
+    into the entry — a source may contain single files far larger than
+    RAM (model blobs), so reading one into memory is not an option. The
+    temp file replaces the cache atomically so a crashed build never
+    corrupts the cache; a failed build deletes its partial temp file.
 
     Args:
         root: Source root directory the relative paths resolve against.
@@ -205,15 +205,30 @@ def _build_zip(
         The zip file size in bytes.
     """
     tmp_path = zip_path.with_suffix(".zip.tmp")
-    with zipfile.ZipFile(tmp_path, "w", compression=ZIP_COMPRESSION) as zf:
-        for relative in sorted(entries):
-            info = zipfile.ZipInfo(
-                filename=relative, date_time=_zip_date_time(entries[relative][1])
-            )
-            info.external_attr = 0o644 << 16
-            with (root / relative).open("rb") as handle:
-                zf.writestr(info, handle.read())
-    os.replace(tmp_path, zip_path)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=ZIP_COMPRESSION) as zf:
+            for relative in sorted(entries):
+                size, mtime, _sha = entries[relative]
+                info = zipfile.ZipInfo(
+                    filename=relative, date_time=_zip_date_time(mtime)
+                )
+                info.external_attr = 0o644 << 16
+                # Publish the manifest size BEFORE opening the entry:
+                # zf.open("w") sizes the local header up front and only
+                # enables Zip64 when file_size predicts an overflow —
+                # otherwise closing an entry whose data exceeds 4 GiB
+                # raises "File size too large" (writestr, the previous
+                # whole-in-RAM writer, derived this from the buffer).
+                info.file_size = size
+                with (
+                    (root / relative).open("rb") as handle,
+                    zf.open(info, mode="w") as entry,
+                ):
+                    shutil.copyfileobj(handle, entry, length=16 * 1024 * 1024)
+        os.replace(tmp_path, zip_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return zip_path.stat().st_size
 
 
@@ -289,12 +304,8 @@ def plan_archive_source(
         logger.info("archive_cache_reused", path=str(root), size=zip_size)
     else:
         zip_size = _build_zip(root, entries, zip_path)
-        manifest_path.write_bytes(
-            ArchiveManifest(entries, manifest_sha).serialize()
-        )
-        logger.info(
-            "archive_built", path=str(root), size=zip_size, files=len(entries)
-        )
+        manifest_path.write_bytes(ArchiveManifest(entries, manifest_sha).serialize())
+        logger.info("archive_built", path=str(root), size=zip_size, files=len(entries))
 
     stat = zip_path.stat()
     return PlannedFile(

@@ -158,14 +158,17 @@ const currentLabel = computed(() => currentDir.value || '(root)')
 
 const breadcrumb = computed(() => {
   if (!currentDir.value) return []
-  // Split on either separator, keeping the full prefix of each segment.
+  // One crumb per NAME segment (not per separator). Separator tokens extend the
+  // accumulator but push nothing, except a leading-only-separator path like "/"
+  // which becomes a single root crumb.
   const parts: { label: string; path: string }[] = []
   let acc = ''
   for (const raw of currentDir.value.split(/([/\\])/)) {
-    acc += raw
     if (raw === '/' || raw === '\\') {
-      parts.push({ label: raw === '\\' ? acc.slice(0, -1) : acc, path: acc })
+      acc += raw
+      if (acc.replace(/[/\\]/g, '') === '') parts.push({ label: acc, path: acc })
     } else if (raw) {
+      acc += raw
       parts.push({ label: raw, path: acc })
     }
   }
