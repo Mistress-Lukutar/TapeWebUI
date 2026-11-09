@@ -2,8 +2,8 @@
 File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
-Date:   2026-11-08
-Version: v0.9.1
+Date:   2026-11-09
+Version: v0.10.0
 """
 
 from __future__ import annotations
@@ -19,10 +19,15 @@ from typing import Literal
 
 import structlog
 
-from tapevaultui.db.models import Tape
+from tapevaultui.db.models import FileEntry, Tape
 from tapevaultui.infrastructure.itdt_transport import (
     FakeItDtTransport,
     ItDtTransport,
+)
+from tapevaultui.infrastructure.tape_device import (
+    DirectReadUnavailableError,
+    DirectTapeReader,
+    TapeDeviceError,
 )
 from tapevaultui.services.archive_builder import plan_archive_source
 from tapevaultui.services.catalog import (
@@ -185,6 +190,7 @@ class BackupEngine:
         work_dir: Path,
         event_bus: EventBus,
         staging_dir: Path | None = None,
+        direct_reader_factory: Callable[[str], DirectTapeReader] | None = None,
     ) -> None:
         """Initialize the engine.
 
@@ -196,12 +202,16 @@ class BackupEngine:
             staging_dir: Persistent cache directory for archive-source
                 zips + manifests (defaults to <data>/staging, derived
                 from work_dir).
+            direct_reader_factory: Factory for DirectTapeReader on Windows
+                (None = legacy ITDT-only verify; tests pass None by default
+                so they never touch hardware).
         """
         self._transport = transport
         self._catalog = catalog
         self._work_dir = work_dir
         self._staging_dir = staging_dir or work_dir.parent / "staging"
         self._event_bus = event_bus
+        self._direct_reader_factory = direct_reader_factory
 
     async def publish(self, stats: BackupStats) -> None:
         """Publish the current progress snapshot on the job topic.
@@ -639,6 +649,14 @@ class BackupEngine:
         first failed read; damaged/skipped entries occupy no tape
         position and consume no read.
 
+        When a direct reader factory is available (Windows): opens the
+        device once for a single-pass direct hash-on-the-fly path (no temp
+        files, drive never idles for hashing). Empty files are exclusively
+        held by the reader so they fall back to ITDT fsf 1 with an
+        exclusive-device dance (close -> fsf 1 -> reopen). If the direct
+        reader is unavailable or fails to reopen, all subsequent files
+        take the legacy ITDT fallback path.
+
         Publishes per-file progress (state stays ``verifying``) so the UI
         shows the phase; every damaged file increments
         ``stats.hash_mismatches``.
@@ -660,7 +678,7 @@ class BackupEngine:
         # physically owns the position, so an ok entry must win the
         # index — otherwise the sequential pass would skip a real tape
         # file and desynchronize every later comparison.
-        entries: dict[int, object] = {}
+        entries: dict[int, FileEntry] = {}
         for entry in self._catalog.list_files(session_id):
             if entry.status == "ok" or entry.tape_file_index not in entries:
                 entries[entry.tape_file_index] = entry
@@ -684,63 +702,141 @@ class BackupEngine:
                 )
                 await self._transport.run(["rewind"])
                 return 0
-        for offset, file in enumerate(files):
-            tape_index = file_base + offset + 1
-            entry = entries.get(tape_index)
-            if entry is None or entry.status != "ok":
-                continue
-            if cancel_check and cancel_check():
-                raise JobCancelled("cancelled during verification")
-            stats.current_file = file.path
-            await self.publish(stats)
-            if file.size == 0:
-                # Empty files are bare filemarks on tape: nothing to read
-                # back, but the position must still be consumed to keep
-                # the sequential pass aligned. Spacing over the filemark
-                # leaves the head exactly where a read would.
-                space = await self._transport.run(["fsf", "1"])
-                if space.exit_code != 0:
-                    self._catalog.mark_file_status(entry.id, "damaged")
-                    stats.hash_mismatches += 1
-                    damaged += 1
-                    logger.warning(
-                        "verify_position_failed",
-                        path=file.path,
-                        tape_index=tape_index,
-                        output=space.stdout.strip(),
+
+        reader: DirectTapeReader | None = None
+        if self._direct_reader_factory is not None:
+            try:
+                reader = self._direct_reader_factory(self._transport.device_name)
+                reader.open()
+            except DirectReadUnavailableError as exc:
+                logger.warning("verify_direct_reader_unavailable", error=str(exc))
+                reader = None
+
+        try:
+            for offset, file in enumerate(files):
+                tape_index = file_base + offset + 1
+                ver_entry: FileEntry | None = entries.get(tape_index)
+                if ver_entry is None or ver_entry.status != "ok":
+                    continue
+                if cancel_check and cancel_check():
+                    raise JobCancelled("cancelled during verification")
+                stats.current_file = file.path
+                await self.publish(stats)
+                if reader is not None:
+                    # ── DIRECT branch ────────────────────────────────
+                    if file.size == 0:
+                        # The device is exclusively held by the reader, so
+                        # ITDT cannot run. Close the reader, space over the
+                        # empty filemark via ITDT fsf 1, then re-open for
+                        # the rest of the pass.
+                        reader.close()
+                        reader = None
+                        space = await self._transport.run(["fsf", "1"])
+                        if space.exit_code != 0:
+                            self._catalog.mark_file_status(ver_entry.id, "damaged")
+                            stats.hash_mismatches += 1
+                            damaged += 1
+                            logger.warning(
+                                "verify_position_failed",
+                                path=file.path,
+                                tape_index=tape_index,
+                                output=space.stdout.strip(),
+                            )
+                            # The head position is no longer trustworthy: stop
+                            # the pass instead of comparing the wrong tape
+                            # files.
+                            break
+                        try:
+                            factory = self._direct_reader_factory
+                            if factory is not None:
+                                reader = factory(self._transport.device_name)
+                                reader.open()
+                        except DirectReadUnavailableError as exc:
+                            logger.warning(
+                                "verify_direct_fallback_after_empty",
+                                error=str(exc),
+                            )
+                            reader = None
+                        continue
+
+                    # Non-empty file: hash-on-the-fly read.
+                    try:
+                        _total, actual = await asyncio.to_thread(
+                            reader.read_file_hashed
+                        )
+                    except TapeDeviceError as exc:
+                        logger.warning(
+                            "verify_direct_read_failed",
+                            path=file.path,
+                            tape_index=tape_index,
+                            error=str(exc),
+                        )
+                        self._catalog.mark_file_status(ver_entry.id, "damaged")
+                        stats.hash_mismatches += 1
+                        damaged += 1
+                        # Position untrustworthy after a read failure.
+                        break
+                    if actual != file.sha256:
+                        self._catalog.mark_file_status(ver_entry.id, "damaged")
+                        stats.hash_mismatches += 1
+                        damaged += 1
+                        logger.warning("verify_hash_mismatch", path=file.path)
+                        # NO break — continue with the next file; position
+                        # is still valid.
+                else:
+                    # ── ITDT branch (reader is None) ───────────────
+                    if file.size == 0:
+                        # Empty files are bare filemarks on tape: nothing to read
+                        # back, but the position must still be consumed to keep
+                        # the sequential pass aligned. Spacing over the filemark
+                        # leaves the head exactly where a read would.
+                        space = await self._transport.run(["fsf", "1"])
+                        if space.exit_code != 0:
+                            self._catalog.mark_file_status(ver_entry.id, "damaged")
+                            stats.hash_mismatches += 1
+                            damaged += 1
+                            logger.warning(
+                                "verify_position_failed",
+                                path=file.path,
+                                tape_index=tape_index,
+                                output=space.stdout.strip(),
+                            )
+                            # The head position is no longer trustworthy: stop the
+                            # pass instead of comparing the wrong tape files.
+                            break
+                        continue
+                    dest = self._work_dir / f"verify_{tape_index}.bin"
+                    result = await self._transport.run(
+                        ["read", "-d", str(dest)],
+                        timeout_s=timeout_for_size(
+                            file.size, self._transport.default_timeout_s
+                        ),
                     )
-                    # The head position is no longer trustworthy: stop the
-                    # pass instead of comparing the wrong tape files.
-                    break
-                continue
-            dest = self._work_dir / f"verify_{tape_index}.bin"
-            result = await self._transport.run(
-                ["read", "-d", str(dest)],
-                timeout_s=timeout_for_size(
-                    file.size, self._transport.default_timeout_s
-                ),
-            )
-            if result.exit_code != 0:
-                dest.unlink(missing_ok=True)
-                self._catalog.mark_file_status(entry.id, "damaged")
-                stats.hash_mismatches += 1
-                damaged += 1
-                logger.warning(
-                    "verify_read_failed",
-                    path=file.path,
-                    tape_index=tape_index,
-                    output=result.stdout.strip(),
-                )
-                # The head position is no longer trustworthy: stop the
-                # pass instead of comparing the wrong tape files.
-                break
-            actual = await asyncio.to_thread(sha256_of, dest)
-            dest.unlink(missing_ok=True)
-            if actual != file.sha256:
-                self._catalog.mark_file_status(entry.id, "damaged")
-                stats.hash_mismatches += 1
-                damaged += 1
-                logger.warning("verify_hash_mismatch", path=file.path)
+                    if result.exit_code != 0:
+                        dest.unlink(missing_ok=True)
+                        self._catalog.mark_file_status(ver_entry.id, "damaged")
+                        stats.hash_mismatches += 1
+                        damaged += 1
+                        logger.warning(
+                            "verify_read_failed",
+                            path=file.path,
+                            tape_index=tape_index,
+                            output=result.stdout.strip(),
+                        )
+                        # The head position is no longer trustworthy: stop the
+                        # pass instead of comparing the wrong tape files.
+                        break
+                    actual = await asyncio.to_thread(sha256_of, dest)
+                    dest.unlink(missing_ok=True)
+                    if actual != file.sha256:
+                        self._catalog.mark_file_status(ver_entry.id, "damaged")
+                        stats.hash_mismatches += 1
+                        damaged += 1
+                        logger.warning("verify_hash_mismatch", path=file.path)
+        finally:
+            if reader is not None:
+                reader.close()
+
         await self._transport.run(["rewind"])
         return damaged
 

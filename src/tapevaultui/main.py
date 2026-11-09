@@ -2,8 +2,8 @@
 File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-09
+Version: v0.10.0
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from tapevaultui.config import Settings, get_settings
 from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport, ItDtTransport
+from tapevaultui.infrastructure.tape_device import windows_direct_reader_factory
 from tapevaultui.routers import catalog as catalog_router
 from tapevaultui.routers import device as device_router
 from tapevaultui.routers import jobs as jobs_router
@@ -138,6 +139,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         catalog=catalog,
         work_dir=settings.data_dir / "tmp",
         event_bus=event_bus,
+        direct_reader_factory=windows_direct_reader_factory(),
     )
     job_defs = JobDefStore(settings.jobs_dir)
     drive_lock = asyncio.Lock()

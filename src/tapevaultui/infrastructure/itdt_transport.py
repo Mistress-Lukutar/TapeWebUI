@@ -2,8 +2,8 @@
 File:   itdt_transport.py
 Brief:  Async subprocess wrapper around the IBM ITDT-SE CLI.
 Author: Mistress-Lukutar
-Date:   2026-11-08
-Version: v0.9.1
+Date:   2026-11-09
+Version: v0.10.0
 """
 
 from __future__ import annotations
@@ -113,6 +113,11 @@ class ItDtTransport:
     def default_timeout_s(self) -> int:
         """Current flat default timeout for one ITDT command (seconds)."""
         return self._default_timeout_s
+
+    @property
+    def device_name(self) -> str:
+        """Device special file this transport opens (e.g. ``\\\\.\\tape0``)."""
+        return self._device_name
 
     async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
         """Run one ITDT command to completion.

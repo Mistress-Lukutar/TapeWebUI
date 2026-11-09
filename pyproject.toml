@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapevaultui"
-version = "0.9.1"
+version = "0.10.0"
 description = "Web app for scheduled LTO tape backups via IBM ITDT-SE (ULTRIUM-TD3)"
 readme = "README.md"
 requires-python = ">=3.11"
