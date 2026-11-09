@@ -324,7 +324,6 @@ onMounted(() => {
   flex-direction: column;
   gap: 2px;
   padding: 10px 12px;
-  border: 1px solid var(--border, #2a2a35);
   border-radius: 6px;
 }
 
@@ -343,7 +342,6 @@ onMounted(() => {
   font-size: 12px;
   white-space: pre-wrap;
   padding: 10px;
-  border: 1px solid var(--border, #2a2a35);
   border-radius: 6px;
 }
 </style>
