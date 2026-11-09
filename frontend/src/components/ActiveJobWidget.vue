@@ -52,7 +52,14 @@ const percent = computed(() => {
       </div>
       <dl class="job-widget-grid">
         <dt>State</dt><dd>{{ job.state }}</dd>
-        <dt>Files</dt><dd>{{ job.files_done }} / {{ job.files_total }}</dd>
+        <dt>Files</dt>
+        <dd>
+          {{ job.files_done }} / {{ job.files_total }}
+          <span v-if="(job.archives ?? 0) > 0" class="dim"
+            >({{ job.archived_files }} files in
+            {{ job.archives }} zip{{ (job.archives ?? 0) > 1 ? 's' : '' }})</span
+          >
+        </dd>
         <dt>Bytes</dt><dd>{{ formatBytes(job.bytes_done) }} / {{ formatBytes(job.bytes_total) }}</dd>
         <dt>Speed</dt><dd>{{ formatBytes(job.speed_bps) }}/s</dd>
         <dt>ETA</dt><dd>{{ formatDuration(job.eta_s) }}</dd>

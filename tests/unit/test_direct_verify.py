@@ -3,12 +3,13 @@ File:   test_direct_verify.py
 Brief:  Direct-reader verify path tests (hash-on-the-fly, empty-file dance, fallback).
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.10.0
+Version: v0.11.0
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -108,6 +109,8 @@ class FakeDirectReader:
         self.open_calls = 0
         self.close_calls = 0
         self.reads = 0
+        # Progress callback tracking (for verify_file_bytes assertions).
+        self.callback_max: int | None = None
 
     def open(self) -> None:
         """Open the reader (optionally failing)."""
@@ -119,7 +122,9 @@ class FakeDirectReader:
         """Close the reader."""
         self.close_calls += 1
 
-    def read_file_hashed(self) -> tuple[int, str]:
+    def read_file_hashed(
+        self, progress_cb: Callable[[int], None] | None = None
+    ) -> tuple[int, str]:
         """Simulate a direct hash-on-the-fly read.
 
         Returns:
@@ -135,7 +140,12 @@ class FakeDirectReader:
         # head so that a subsequent ITDT fsf 1 advances past the filemark.
         if len(data) > 0:
             self.fake.position += 1
-        return len(data), hashlib.sha256(data).hexdigest()
+        total = len(data)
+        if progress_cb is not None:
+            progress_cb(total)
+            if self.callback_max is None or total > self.callback_max:
+                self.callback_max = total
+        return total, hashlib.sha256(data).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +213,9 @@ async def test_direct_verify_hashes_on_the_fly(tmp_path: Path) -> None:
     assert files[2].status == "ok"  # b.txt
     assert stats.hash_mismatches == 0
     assert reader.reads == 2
+    # Verify counters: two ok files, both fully counted.
+    assert stats.verified_files == 2
+    assert stats.verified_bytes == 8  # b"AAAA" (4) + b"BBBB" (4)
 
     # No ITDT read command in the verify phase (proves direct path used).
     last_weof = len(fake.commands) - fake.commands[::-1].index(("weof", "1"))
@@ -254,6 +267,10 @@ async def test_direct_verify_hash_mismatch_continues(tmp_path: Path) -> None:
     assert files[2].status == "ok"
     assert stats.hash_mismatches == 1
     assert "verification failed" in stats.error
+    # Both files fully read: hash-mismatched a.txt still counted, b.txt ok.
+    assert stats.verified_files == 2
+    # Planned sizes count, not tape bytes: a.txt (4) + b.txt (4).
+    assert stats.verified_bytes == 8
 
 
 async def test_direct_read_failure_stops_pass(tmp_path: Path) -> None:
@@ -372,3 +389,148 @@ async def test_direct_verify_spaces_empty_file_and_reopens(tmp_path: Path) -> No
     # Reader opened twice (initial + reopen after empty file), closed at least once.
     assert reader.open_calls == 2
     assert reader.close_calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# Task B: _verify_pass counter assertions
+# ---------------------------------------------------------------------------
+
+
+async def test_direct_verify_progress_callback_tracks_bytes(tmp_path: Path) -> None:
+    """The direct reader progress callback updates verify_file_bytes.
+
+    FakeDirectReader tracks the max value reported via callback; this should
+    equal the size of the largest file read during verification. After each
+    file, stats.verify_file_bytes is reset to 0.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BBBBBBBBBBBBBBBB")  # 16 bytes
+
+    fake, reader = _build_tape(content_a=b"AAAA", content_b=b"BBBBBBBBBBBBBBBB")
+    repo = _make_repo()
+    engine = BackupEngine(
+        fake,
+        repo,
+        tmp_path / "work",
+        EventBus(),
+        direct_reader_factory=lambda _d: reader,
+    )
+    stats = await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    # Both files verified ok.
+    assert stats.hash_mismatches == 0
+    assert reader.reads == 2
+
+    # Progress callback was invoked; max reported value should be the largest file.
+    assert reader.callback_max == 16  # b"BBBBBBBBBBBBBBBB" is 16 bytes
+
+    # After verification, verify_file_bytes should be reset to 0 (last file).
+    assert stats.verify_file_bytes == 0
+
+
+async def test_direct_verify_empty_file_counts_in_verified(tmp_path: Path) -> None:
+    """Empty files are counted in verified_files with 0 bytes added.
+
+    An empty file goes through the close->fsf1->reopen dance and increments
+    verified_files by 1, adds 0 to verified_bytes.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "empty.txt").touch()  # 0 bytes
+    (src / "b.txt").write_bytes(b"CONTENT-B")
+
+    header = serialize_header(
+        build_session_header(
+            tape_id="direct-tape",
+            session_id=new_session_id(),
+            started_at=datetime.now(UTC),
+        )
+    )
+    # Files sorted by path: b.txt < empty.txt.
+    fake = FakeItDtTransport(tape_files=[header, b"CONTENT-B", b""])
+    reader = FakeDirectReader(fake)
+    repo = _make_repo()
+    engine = BackupEngine(
+        fake,
+        repo,
+        tmp_path / "work",
+        EventBus(),
+        direct_reader_factory=lambda _d: reader,
+    )
+    stats = await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    # Both files verified ok.
+    assert stats.hash_mismatches == 0
+    assert stats.verified_files == 2  # b.txt + empty.txt
+    assert stats.verified_bytes == 9  # only b.txt contributes (9 bytes)
+
+
+async def test_direct_verify_hash_mismatch_counts_in_verified(tmp_path: Path) -> None:
+    """A hash-mismatched file is still counted in verified_files/verified_bytes.
+
+    Damaged files that were fully read should increment the verify counters;
+    only a read failure (break path) skips counting.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BBBB")
+
+    tape_files = [
+        serialize_header(
+            build_session_header(
+                tape_id="direct-tape",
+                session_id=new_session_id(),
+                started_at=datetime.now(UTC),
+            )
+        ),
+        b"CORRUPTED_DATA_HERE",  # corrupted a.txt content (17 bytes on tape)
+        b"BBBB",
+    ]
+    fake = FakeItDtTransport(tape_files=tape_files)
+    reader = FakeDirectReader(fake)
+    repo = _make_repo()
+    engine = BackupEngine(
+        fake,
+        repo,
+        tmp_path / "work",
+        EventBus(),
+        direct_reader_factory=lambda _d: reader,
+    )
+    stats = await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    # a.txt damaged (hash mismatch), b.txt ok.
+    assert stats.hash_mismatches == 1
+    assert stats.verified_files == 2  # both fully read despite mismatch
+    # Planned sizes count, not tape bytes: a.txt (4) + b.txt (4).
+    assert stats.verified_bytes == 8
+
+
+async def test_direct_verify_read_failure_skips_counting(tmp_path: Path) -> None:
+    """A read failure breaks the pass and does NOT count the failed file.
+
+    The break path in _verify_pass skips the verified_files/verified_bytes
+    increment for the file that caused the error.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BBBB")
+
+    fake, reader = _build_tape(fail_position=1)  # fail on first content read
+    repo = _make_repo()
+    engine = BackupEngine(
+        fake,
+        repo,
+        tmp_path / "work",
+        EventBus(),
+        direct_reader_factory=lambda _d: reader,
+    )
+    stats = await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    # a.txt damaged due to read failure; b.txt not read.
+    assert stats.hash_mismatches == 1
+    assert stats.verified_files == 0  # failed file not counted, pass broke
+    assert stats.verified_bytes == 0

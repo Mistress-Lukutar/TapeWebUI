@@ -3,7 +3,7 @@ File:   tape_device.py
 Brief:  Direct \\.\tape0 streaming reader via kernel32 ReadFile + SetTapeParameters.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.10.0
+Version: v0.11.0
 """
 
 from __future__ import annotations
@@ -61,8 +61,14 @@ class DirectTapeReader(Protocol):
 
     def close(self) -> None: ...
 
-    def read_file_hashed(self) -> tuple[int, str]:
-        """Read the current tape file and return (bytes_read, sha256_hex)."""
+    def read_file_hashed(
+        self, progress_cb: Callable[[int], None] | None = None
+    ) -> tuple[int, str]:
+        """Read the current tape file and return (bytes_read, sha256_hex).
+
+        ``progress_cb`` is called with the cumulative byte count after each
+        chunk read.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -185,12 +191,18 @@ class TapeDeviceReader:
         self._kernel32 = kernel32
         logger.info("direct_reader_opened", device_name=self._device_name)
 
-    def read_file_hashed(self) -> tuple[int, str]:
+    def read_file_hashed(
+        self, progress_cb: Callable[[int], None] | None = None
+    ) -> tuple[int, str]:
         """Read the current tape file, hashing each chunk with SHA-256.
 
         The caller must have called ``open()`` first.  This method loops on
         ReadFile until end-of-file (got == 0) or a filemark is encountered
         (WinError 1101).  Partial transfers before a filemark are still hashed.
+
+        Args:
+            progress_cb: Optional callback invoked with cumulative byte count
+                after each successful read.
 
         Returns:
             A ``(total_bytes, sha256_hex)`` tuple for the current tape file.
@@ -219,6 +231,8 @@ class TapeDeviceReader:
                 data = buf.raw[: got.value]
                 hasher.update(data)
                 total += got.value
+                if progress_cb is not None:
+                    progress_cb(total)
                 if got.value == 0:
                     # Clean end-of-file.
                     break
@@ -229,6 +243,8 @@ class TapeDeviceReader:
                     data = buf.raw[: got.value]
                     hasher.update(data)
                     total += got.value
+                    if progress_cb is not None:
+                        progress_cb(total)
 
                 if err == ERROR_FILEMARK_DETECTED:
                     # Expected end of tape file — stop cleanly.

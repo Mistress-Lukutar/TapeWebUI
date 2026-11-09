@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.10.0
+Version: v0.11.0
 """
 
 from __future__ import annotations
@@ -123,6 +123,14 @@ class BackupStats:
         self.archived_files = 0
         self.bytes_total = 0
         self.bytes_done = 0
+        # Readback verify progress. While state == "verifying", snapshot()
+        # reports these counters instead of the written totals (which sit at
+        # 100% and make the phase look frozen).
+        self.verified_files = 0
+        self.verified_bytes = 0
+        # In-file byte position reported by the direct reader progress callback.
+        self.verify_file_bytes = 0
+        self.verify_started_monotonic: float | None = None
         self.current_file = ""
         self.current_file_started: float | None = None
         self.tape_id = ""
@@ -140,15 +148,28 @@ class BackupStats:
         file: elapsed-since-current-file-start times the average speed
         (spec §4.3 — no intra-file byte counter in v1).
 
+        During the ``verifying`` phase when ``verify_started_monotonic`` is
+        set, counters are driven by verify progress so the UI does not show
+        a frozen 100 % completion.  ``bytes_confirmed`` always reflects the
+        written bytes (``self.bytes_done``).
+
         Returns:
             Dict with all progress fields.
         """
+        files_done = self.files_done
         elapsed = time.monotonic() - self.started_monotonic
         speed = self.bytes_done / elapsed if elapsed > 0 else 0.0
         estimated = float(self.bytes_done)
         if self.current_file_started is not None and speed > 0:
             in_file = time.monotonic() - self.current_file_started
             estimated = min(estimated + speed * in_file, float(self.bytes_total))
+        if self.state == "verifying" and self.verify_started_monotonic is not None:
+            elapsed = time.monotonic() - self.verify_started_monotonic
+            estimated = min(
+                self.verified_bytes + self.verify_file_bytes, float(self.bytes_total)
+            )
+            speed = estimated / elapsed if elapsed > 0 else 0.0
+            files_done = self.verified_files
         remaining_bytes = self.bytes_total - estimated
         eta = remaining_bytes / speed if speed > 0 else None
         return {
@@ -156,7 +177,7 @@ class BackupStats:
             "run_id": self.run_id,
             "state": self.state,
             "files_total": self.files_total,
-            "files_done": self.files_done,
+            "files_done": files_done,
             "archives": self.archives_total,
             "archived_files": self.archived_files,
             "bytes_total": self.bytes_total,
@@ -617,6 +638,7 @@ class BackupEngine:
         self._catalog.update_tape(tape_row.id, bytes_used_delta=bytes_written_in_pass)
         if definition.options.verify == "readback":
             stats.state = "verifying"
+            stats.verify_started_monotonic = time.monotonic()
             await self.publish(stats)
             damaged = await self._verify_pass(
                 session.id, session.file_base, files, stats, cancel_check
@@ -659,7 +681,11 @@ class BackupEngine:
 
         Publishes per-file progress (state stays ``verifying``) so the UI
         shows the phase; every damaged file increments
-        ``stats.hash_mismatches``.
+        ``stats.hash_mismatches``.  On the direct-reader path non-empty
+        files also report intra-file byte position via a progress callback,
+        and ``verified_files`` / ``verified_bytes`` drive
+        ``snapshot()`` during the verify phase so the UI shows real-time
+        read progress instead of frozen 100 %.
 
         Args:
             session_id: Catalog session id for status updates.
@@ -721,6 +747,7 @@ class BackupEngine:
                 if cancel_check and cancel_check():
                     raise JobCancelled("cancelled during verification")
                 stats.current_file = file.path
+                stats.verify_file_bytes = 0
                 await self.publish(stats)
                 if reader is not None:
                     # ── DIRECT branch ────────────────────────────────
@@ -757,12 +784,20 @@ class BackupEngine:
                                 error=str(exc),
                             )
                             reader = None
+                        stats.verified_files += 1
+                        stats.verified_bytes += file.size
+                        stats.verify_file_bytes = 0
+                        await self.publish(stats)
                         continue
 
-                    # Non-empty file: hash-on-the-fly read.
+                    # Non-empty file: hash-on-the-fly read with progress callback.
+                    def _progress(total: int) -> None:
+                        stats.verify_file_bytes = total
+
+                    ticker = self._start_ticker(stats)
                     try:
                         _total, actual = await asyncio.to_thread(
-                            reader.read_file_hashed
+                            reader.read_file_hashed, _progress
                         )
                     except TapeDeviceError as exc:
                         logger.warning(
@@ -776,6 +811,8 @@ class BackupEngine:
                         damaged += 1
                         # Position untrustworthy after a read failure.
                         break
+                    finally:
+                        _stop_ticker(ticker)
                     if actual != file.sha256:
                         self._catalog.mark_file_status(ver_entry.id, "damaged")
                         stats.hash_mismatches += 1
@@ -783,6 +820,10 @@ class BackupEngine:
                         logger.warning("verify_hash_mismatch", path=file.path)
                         # NO break — continue with the next file; position
                         # is still valid.
+                    stats.verified_files += 1
+                    stats.verified_bytes += file.size
+                    stats.verify_file_bytes = 0
+                    await self.publish(stats)
                 else:
                     # ── ITDT branch (reader is None) ───────────────
                     if file.size == 0:
@@ -804,6 +845,10 @@ class BackupEngine:
                             # The head position is no longer trustworthy: stop the
                             # pass instead of comparing the wrong tape files.
                             break
+                        stats.verified_files += 1
+                        stats.verified_bytes += file.size
+                        stats.verify_file_bytes = 0
+                        await self.publish(stats)
                         continue
                     dest = self._work_dir / f"verify_{tape_index}.bin"
                     result = await self._transport.run(
@@ -833,6 +878,10 @@ class BackupEngine:
                         stats.hash_mismatches += 1
                         damaged += 1
                         logger.warning("verify_hash_mismatch", path=file.path)
+                    stats.verified_files += 1
+                    stats.verified_bytes += file.size
+                    stats.verify_file_bytes = 0
+                    await self.publish(stats)
         finally:
             if reader is not None:
                 reader.close()
