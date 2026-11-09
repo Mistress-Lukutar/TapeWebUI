@@ -3,7 +3,7 @@ File:   backup_engine.py
 Brief:  Job execution: snapshot -> write session (t0 + files) -> verify.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.0
+Version: v0.11.1
 """
 
 from __future__ import annotations
@@ -733,7 +733,9 @@ class BackupEngine:
         if self._direct_reader_factory is not None:
             try:
                 reader = self._direct_reader_factory(self._transport.device_name)
-                reader.open()
+                # open() sleeps between sharing-violation retries — keep
+                # that off the event loop.
+                await asyncio.to_thread(reader.open)
             except DirectReadUnavailableError as exc:
                 logger.warning("verify_direct_reader_unavailable", error=str(exc))
                 reader = None
@@ -777,7 +779,7 @@ class BackupEngine:
                             factory = self._direct_reader_factory
                             if factory is not None:
                                 reader = factory(self._transport.device_name)
-                                reader.open()
+                                await asyncio.to_thread(reader.open)
                         except DirectReadUnavailableError as exc:
                             logger.warning(
                                 "verify_direct_fallback_after_empty",

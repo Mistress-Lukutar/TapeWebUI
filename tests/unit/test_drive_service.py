@@ -2,8 +2,8 @@
 File:   test_drive_service.py
 Brief:  DriveService unit tests on the fake transport.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-09
+Version: v0.11.1
 """
 
 from __future__ import annotations
@@ -208,3 +208,61 @@ async def test_published_payload_includes_updated_at() -> None:
     # Regression: significant_state() alone omits updated_at, which made
     # the dashboard crash on "undefined.endsWith".
     assert "updated_at" in events[0]
+
+
+async def test_busy_gate_freezes_on_last_snapshot() -> None:
+    """While a job is active, polling must not touch the device.
+
+    The job's direct reader holds \\.\tape0 exclusively; one overlapping
+    ITDT open used to demote the whole verify pass to the 8x-slower ITDT
+    fallback. With the gate set, refresh returns the frozen snapshot and
+    issues no commands.
+    """
+    fake = FakeItDtTransport(
+        scenarios={
+            "vpd": (load_fixture("fixture_vpd.txt"), 0),
+            "qrypos": (load_fixture("fixture_qrypos.txt"), 0),
+            "getparms": (load_fixture("fixture_getparms.txt"), 0),
+        }
+    )
+    busy = {"active": False}
+    service = DriveService(
+        fake, EventBus(), poll_interval_s=60.0, busy_check=lambda: busy["active"]
+    )
+
+    first = await service.refresh_and_publish()
+    fake.commands.clear()
+    busy["active"] = True
+    frozen = await service.refresh_and_publish()
+
+    assert frozen == first
+    assert fake.commands == []  # device untouched while busy
+
+    busy["active"] = False
+    await service.refresh_and_publish()
+    # The first poll after the job queries the device again.
+    assert fake.commands == [("vpd",), ("qrypos",), ("getparms",)]
+
+
+async def test_busy_gate_queries_when_no_snapshot_yet() -> None:
+    """With no snapshot at all, the gate still allows one query.
+
+    Edge case (unreachable via normal startup ordering): a job active
+    before the first poll must not leave the service with no status to
+    return.
+    """
+    fake = FakeItDtTransport(
+        scenarios={
+            "vpd": (load_fixture("fixture_vpd.txt"), 0),
+            "qrypos": (load_fixture("fixture_qrypos.txt"), 0),
+            "getparms": (load_fixture("fixture_getparms.txt"), 0),
+        }
+    )
+    service = DriveService(
+        fake, EventBus(), poll_interval_s=60.0, busy_check=lambda: True
+    )
+
+    status = await service.refresh_and_publish()
+
+    assert status.reachable is True
+    assert fake.commands == [("vpd",), ("qrypos",), ("getparms",)]

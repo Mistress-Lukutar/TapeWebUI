@@ -3,7 +3,7 @@ File:   main.py
 Brief:  FastAPI app factory, lifespan, SSE endpoint and static mounting.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.10.0
+Version: v0.11.1
 """
 
 from __future__ import annotations
@@ -124,12 +124,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             open_retries=settings.itdt_open_retries,
         )
 
-    drive = DriveService(
-        transport=transport,
-        event_bus=event_bus,
-        poll_interval_s=settings.drive_poll_interval,
-    )
-
     # Catalog: migrations run on every startup (alembic from day one).
     catalog = CatalogRepository(sqlite_url_for_path(settings.catalog_db_path))
     await asyncio.to_thread(_upgrade_catalog)
@@ -142,8 +136,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         direct_reader_factory=windows_direct_reader_factory(),
     )
     job_defs = JobDefStore(settings.jobs_dir)
-    drive_lock = asyncio.Lock()
     job_runtime = JobRuntime(engine=engine, catalog=catalog, event_bus=event_bus)
+    drive_lock = asyncio.Lock()
+
+    # The poller must not touch the device while a job owns it: the
+    # verify reader holds \\.\tape0 exclusively, and one overlapping
+    # poll demotes the whole verify pass to the 8x-slower ITDT fallback.
+    drive = DriveService(
+        transport=transport,
+        event_bus=event_bus,
+        poll_interval_s=settings.drive_poll_interval,
+        busy_check=lambda: job_runtime.active is not None,
+    )
     job_runtime.start()
     restore_engine = RestoreEngine(
         transport=transport,

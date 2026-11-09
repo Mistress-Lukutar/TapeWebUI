@@ -3,7 +3,7 @@ File:   tape_device.py
 Brief:  Direct \\.\tape0 streaming reader via kernel32 ReadFile + SetTapeParameters.
 Author: Mistress-Lukutar
 Date:   2026-11-09
-Version: v0.11.0
+Version: v0.11.1
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import ctypes
 import ctypes.wintypes
 import hashlib
 import sys
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -28,6 +29,11 @@ READ_BUFFER_BYTES = 1024 * 1024
 
 #: WinError code returned by ReadFile when a filemark is encountered.
 ERROR_FILEMARK_DETECTED = 1101
+
+#: WinError code for ERROR_SHARING_VIOLATION on CreateFileW. The tape
+#: driver is exclusive-open; the error is transient when another process
+#: (e.g. a concurrently finishing ITDT command) still holds the device.
+ERROR_SHARING_VIOLATION = 32
 
 #: SetTapeParameters option value to set BlockSize (TAPE_SET_MEDIA_PARAMETERS).
 TAPE_SET_MEDIA_PARAMS = 0
@@ -132,18 +138,86 @@ class TapeDeviceReader:
     inside ``asyncio.to_thread``.
     """
 
-    def __init__(self, device_name: str) -> None:
+    def __init__(
+        self,
+        device_name: str,
+        *,
+        open_retries: int = 3,
+        open_retry_s: float = 2.0,
+    ) -> None:
         """Initialize the reader without touching hardware.
 
         Args:
             device_name: Windows device path, e.g. ``\\\\.\\tape0``.
+            open_retries: Extra CreateFileW attempts after a sharing
+                violation (the drive poller holds the device ~2 s every
+                poll cycle; the ITDT transport retries the same way).
+            open_retry_s: Delay between open attempts, in seconds.
         """
         self._device_name = device_name
+        self._open_retries = open_retries
+        self._open_retry_s = open_retry_s
         self._handle: ctypes.wintypes.HANDLE | None = None
         self._kernel32: ctypes.WinDLL | None = None
 
+    def _create_exclusive(self, kernel32: ctypes.WinDLL) -> ctypes.wintypes.HANDLE:
+        """Create the device handle with sharing-violation retries.
+
+        The tape driver is exclusive-open; a background poller or a
+        just-finished ITDT command may hold the device for a moment, so
+        a sharing violation is transient and retried. Any other error
+        fails immediately.
+
+        Args:
+            kernel32: Bound kernel32 DLL.
+
+        Returns:
+            A valid device handle.
+
+        Raises:
+            DirectReadUnavailableError: If the device cannot be opened
+                after all retries (or the failure is not transient).
+        """
+        GENERIC_READ = 0x80000000
+        GENERIC_WRITE = 0x40000000
+        OPEN_EXISTING = 3
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        attempts = self._open_retries + 1
+        for attempt in range(1, attempts + 1):
+            handle = kernel32.CreateFileW(
+                self._device_name,
+                GENERIC_READ | GENERIC_WRITE,
+                0,  # no sharing — exclusive access
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if handle != INVALID_HANDLE_VALUE and handle is not None:
+                return handle  # type: ignore[no-any-return]
+            err = ctypes.get_last_error()
+            if err != ERROR_SHARING_VIOLATION or attempt == attempts:
+                raise DirectReadUnavailableError(
+                    f"CreateFileW failed for {self._device_name}: WinError {err}"
+                )
+            logger.warning(
+                "direct_reader_open_retry",
+                device_name=self._device_name,
+                attempt=attempt,
+                retry_in_s=self._open_retry_s,
+            )
+            time.sleep(self._open_retry_s)
+        raise DirectReadUnavailableError(  # pragma: no cover
+            f"CreateFileW failed for {self._device_name}: exhausted retries"
+        )
+
     def open(self) -> None:
         """Open the tape device and configure block size to variable.
+
+        Sharing violations (WinError 32) are retried with a short delay;
+        see ``_create_exclusive``. Blocking — run inside
+        ``asyncio.to_thread`` when a retry delay is acceptable.
 
         Raises:
             DirectReadUnavailableError: If the device cannot be opened,
@@ -153,34 +227,15 @@ class TapeDeviceReader:
             raise DirectReadUnavailableError("Direct tape reader requires win32")
 
         kernel32 = _get_kernel32()
-
-        GENERIC_READ = 0x80000000
-        GENERIC_WRITE = 0x40000000
-        OPEN_EXISTING = 3
-        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-        handle = kernel32.CreateFileW(
-            self._device_name,
-            GENERIC_READ | GENERIC_WRITE,
-            0,  # no sharing — exclusive access
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
-        )
-
-        if handle == INVALID_HANDLE_VALUE or handle is None:
-            err = ctypes.get_last_error()
-            raise DirectReadUnavailableError(
-                f"CreateFileW failed for {self._device_name}: WinError {err}"
-            )
+        handle = self._create_exclusive(kernel32)
 
         # Set BlockSize=0 (variable block mode) — REQUIRED before ReadFile.
+        # Win32 DWORD error code: 0 = NO_ERROR (success), nonzero fails.
         params = _TAPE_SET_MEDIA_PARAMETERS(0)
         rc = kernel32.SetTapeParameters(
             handle, TAPE_SET_MEDIA_PARAMS, ctypes.byref(params)
         )
-        if rc == 0:
+        if rc != 0:
             err = ctypes.get_last_error()
             kernel32.CloseHandle(handle)
             raise DirectReadUnavailableError(

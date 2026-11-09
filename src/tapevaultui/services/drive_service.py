@@ -2,14 +2,15 @@
 File:   drive_service.py
 Brief:  Drive/media status via ITDT with polling and SSE publication.
 Author: Mistress-Lukutar
-Date:   2026-11-07
-Version: v0.7.0
+Date:   2026-11-09
+Version: v0.11.1
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
@@ -74,6 +75,7 @@ class DriveService:
         transport: ItDtTransport | FakeItDtTransport,
         event_bus: EventBus,
         poll_interval_s: float = 15.0,
+        busy_check: Callable[[], bool] | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -81,10 +83,15 @@ class DriveService:
             transport: ITDT transport (real or fake).
             event_bus: Bus for ``drive`` topic publications.
             poll_interval_s: Seconds between background status refreshes.
+            busy_check: Optional gate consulted before every device query;
+                while it returns True (a job owns the exclusively-opened
+                device), polling freezes on the last snapshot instead of
+                colliding with the job's direct reader / ITDT commands.
         """
         self._transport = transport
         self._event_bus = event_bus
         self._poll_interval_s = poll_interval_s
+        self._busy_check = busy_check
         self._last_status: DriveStatus | None = None
         self._previous_significant: dict[str, object] | None = None
         self._poll_task: asyncio.Task[None] | None = None
@@ -164,14 +171,32 @@ class DriveService:
     async def refresh_and_publish(self) -> DriveStatus:
         """Query status and publish it if anything changed.
 
+        When the ``busy_check`` gate reports an active job, the device is
+        left alone: the last snapshot is returned as-is (no query, no
+        publication). The job's direct reader holds ``\\.\tape0``
+        exclusively — one overlapping ITDT open turns the whole verify
+        pass into the 8x-slower ITDT fallback (sharing violation,
+        2026-11-09 run 32). The first poll after the job finishes
+        publishes a fresh snapshot again.
+
         The published payload is the FULL snapshot (including
         ``updated_at``, JSON-encoded): the UI renders the timestamp
         directly, so omitting it crashes the dashboard on every event.
         Change detection still compares the significant state only.
 
         Returns:
-            The fresh DriveStatus snapshot.
+            The fresh DriveStatus snapshot (or the frozen last one while
+            a job is active).
         """
+        if (
+            self._busy_check is not None
+            and self._busy_check()
+            and self._last_status is not None
+        ):
+            return self._last_status
+        # No snapshot yet (a job active before the first poll — not
+        # reachable through normal startup ordering): query anyway
+        # rather than publish nothing.
         status = await self.query_status()
         previous = self._previous_significant
         current = status.significant_state()
