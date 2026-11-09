@@ -139,39 +139,104 @@ class BackupStats:
         # hash mismatch); mirrors the restore stats field of the same name.
         self.hash_mismatches = 0
         self.started_monotonic = time.monotonic()
+        # Wall-clock anchor of the current state (set_state updates it);
+        # write/verify phase durations accumulate from these deltas.
+        self.state_since_monotonic = self.started_monotonic
+        # Time actually spent writing / verifying (waiting_media and
+        # preparation excluded); recorded in history via stats_json.
+        self.write_elapsed_s = 0.0
+        self.verify_elapsed_s = 0.0
         self.error = ""
+
+    def set_state(self, state: str) -> None:
+        """Transition the state machine, accumulating phase wall time.
+
+        Time spent in ``writing`` / ``verifying`` is added to
+        ``write_elapsed_s`` / ``verify_elapsed_s`` so history can show
+        per-phase durations and the write speed can exclude queue,
+        preparation and media-wait time.
+
+        Args:
+            state: New state-machine state.
+        """
+        now = time.monotonic()
+        delta = now - self.state_since_monotonic
+        if self.state == "writing":
+            self.write_elapsed_s += delta
+        elif self.state == "verifying":
+            self.verify_elapsed_s += delta
+        # An in-file estimate is valid only inside the writing stretch that
+        # started it; never let it leak into a media wait or the next pass.
+        if state != self.state:
+            self.current_file_started = None
+        self.state = state
+        self.state_since_monotonic = now
 
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-serializable progress payload.
 
         ``bytes_done`` includes the estimated position within the current
-        file: elapsed-since-current-file-start times the average speed
-        (spec §4.3 — no intra-file byte counter in v1).
+        file: elapsed-since-current-file-start times the average write
+        speed (spec §4.3 — no intra-file byte counter in v1).
 
         During the ``verifying`` phase when ``verify_started_monotonic`` is
         set, counters are driven by verify progress so the UI does not show
         a frozen 100 % completion.  ``bytes_confirmed`` always reflects the
         written bytes (``self.bytes_done``).
 
+        Speed is measured against completed-write wall time (``writing``
+        stretches minus the current unfinished file) — not against
+        whole-job time, which would drag the speed down by the slow
+        preparation (snapshot walk, archive staging) and inflate the ETA.
+        Until the first file completes no throughput is known:
+        ``indeterminate`` is True and the UI renders an animated bar
+        instead of a fake 0 %.
+
         Returns:
             Dict with all progress fields.
         """
         files_done = self.files_done
-        elapsed = time.monotonic() - self.started_monotonic
-        speed = self.bytes_done / elapsed if elapsed > 0 else 0.0
+        now = time.monotonic()
+        # Accumulators contain completed stretches only; include the current
+        # one so live progress and the terminal history row use the same
+        # definition of phase duration.
+        state_stretch = now - self.state_since_monotonic
+        write_active = self.write_elapsed_s
+        verify_active = self.verify_elapsed_s
+        if self.state == "writing":
+            write_active += state_stretch
+        elif self.state == "verifying":
+            verify_active += state_stretch
         estimated = float(self.bytes_done)
-        if self.current_file_started is not None and speed > 0:
-            in_file = time.monotonic() - self.current_file_started
-            estimated = min(estimated + speed * in_file, float(self.bytes_total))
+        speed = 0.0
         if self.state == "verifying" and self.verify_started_monotonic is not None:
-            elapsed = time.monotonic() - self.verify_started_monotonic
+            elapsed = verify_active
             estimated = min(
                 self.verified_bytes + self.verify_file_bytes, float(self.bytes_total)
             )
             speed = estimated / elapsed if elapsed > 0 else 0.0
             files_done = self.verified_files
+        else:
+            elapsed = now - self.started_monotonic
+            in_file = 0.0
+            if self.state == "writing" and self.current_file_started is not None:
+                in_file = max(0.0, now - self.current_file_started)
+            # The current file contributes no confirmed bytes yet, so its
+            # elapsed time must not dilute the completed-write throughput.
+            # Without this subtraction speed sinks and ETA grows throughout
+            # every large file even while the drive runs at full speed.
+            completed_write = write_active - in_file
+            if completed_write > 0:
+                speed = self.bytes_done / completed_write
+            if in_file > 0 and speed > 0:
+                estimated = min(estimated + speed * in_file, float(self.bytes_total))
         remaining_bytes = self.bytes_total - estimated
         eta = remaining_bytes / speed if speed > 0 else None
+        indeterminate = estimated <= 0 and self.state not in (
+            "done",
+            "failed",
+            "cancelled",
+        )
         return {
             "job_name": self.job_name,
             "run_id": self.run_id,
@@ -190,6 +255,9 @@ class BackupStats:
             "speed_bps": round(speed, 1),
             "eta_s": round(eta) if eta is not None else None,
             "elapsed_s": round(elapsed, 1),
+            "indeterminate": indeterminate,
+            "write_elapsed_s": round(write_active, 1),
+            "verify_elapsed_s": round(verify_active, 1),
             "error": self.error,
         }
 
@@ -277,7 +345,7 @@ class BackupEngine:
             TapeFullError: If the tape filled and no media callback given.
             BackupEngineError: On unrecoverable ITDT/snapshot failures.
         """
-        stats.state = "preparing"
+        stats.set_state("preparing")
         await self.publish(stats)
 
         kind, baseline = self._decide_kind_and_baseline(definition)
@@ -498,7 +566,7 @@ class BackupEngine:
             sha256="0" * 64,
         )
 
-        stats.state = "writing"
+        stats.set_state("writing")
         await self.publish(stats)
         files_processed = 0
         bytes_written_in_pass = 0
@@ -628,6 +696,10 @@ class BackupEngine:
             files_processed += 1
             stats.files_done += 1
             stats.bytes_done += file.size
+            # The just-finished file is now part of the confirmed totals:
+            # clear its in-file anchor before publishing so the completed
+            # write time and byte count describe the same set of files.
+            stats.current_file_started = None
             bytes_written_in_pass += file.size
             await self.publish(stats)
 
@@ -637,7 +709,7 @@ class BackupEngine:
 
         self._catalog.update_tape(tape_row.id, bytes_used_delta=bytes_written_in_pass)
         if definition.options.verify == "readback":
-            stats.state = "verifying"
+            stats.set_state("verifying")
             stats.verify_started_monotonic = time.monotonic()
             await self.publish(stats)
             damaged = await self._verify_pass(
@@ -1014,7 +1086,7 @@ class BackupEngine:
             stats: Progress accumulator.
             wait_for_media: Callback awaiting tape insertion.
         """
-        stats.state = "waiting_media"
+        stats.set_state("waiting_media")
         await self.publish(stats)
         ready = await wait_for_media()
         if not ready:

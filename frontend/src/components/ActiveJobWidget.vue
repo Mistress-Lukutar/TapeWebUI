@@ -26,7 +26,7 @@ const kindLabel = computed(() =>
 
 const percent = computed(() => {
   const active = job.value
-  if (!active || !active.bytes_total) return null
+  if (!active || !active.bytes_total || active.indeterminate) return null
   return Math.min(100, Math.round((active.bytes_done / active.bytes_total) * 100))
 })
 </script>
@@ -39,15 +39,15 @@ const percent = computed(() => {
         :class="{ wait: job.state === 'waiting_media', error: job.error }"
       />
       <span class="job-widget-label">{{ kindLabel }}: {{ job.job_name || '—' }}</span>
-      <span v-if="percent !== null" class="job-widget-pct">{{ percent }}%</span>
+      <span class="job-widget-pct">{{ percent !== null ? percent + '%' : '…' }}</span>
       <span class="job-widget-chevron">{{ expanded ? '▾' : '▴' }}</span>
     </button>
     <div v-if="expanded" class="job-widget-detail">
       <div class="job-widget-progress">
         <div
           class="job-widget-fill"
-          :class="{ error: job.error }"
-          :style="{ width: (percent ?? 0) + '%' }"
+          :class="{ error: job.error, indeterminate: percent === null }"
+          :style="{ width: (percent === null ? 100 : percent) + '%' }"
         />
       </div>
       <dl class="job-widget-grid">
@@ -61,7 +61,7 @@ const percent = computed(() => {
           >
         </dd>
         <dt>Bytes</dt><dd>{{ formatBytes(job.bytes_done) }} / {{ formatBytes(job.bytes_total) }}</dd>
-        <dt>Speed</dt><dd>{{ formatBytes(job.speed_bps) }}/s</dd>
+        <dt>Speed</dt><dd>{{ job.indeterminate ? '—' : formatBytes(job.speed_bps) + '/s' }}</dd>
         <dt>ETA</dt><dd>{{ formatDuration(job.eta_s) }}</dd>
         <template v-if="job.current_file">
           <dt>Current file</dt><dd class="mono" :title="job.current_file">{{ job.current_file }}</dd>

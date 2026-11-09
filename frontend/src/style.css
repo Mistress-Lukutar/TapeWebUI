@@ -870,6 +870,32 @@ button.danger-solid:hover:not(:disabled) {
   transition: width 0.4s ease;
 }
 
+/* No throughput known yet (preparation, first file): full-width stripe
+   sweep instead of a frozen 0 %. */
+.job-widget-fill.indeterminate {
+  transition: none;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0 12px,
+    var(--bg-input) 12px 24px
+  );
+  animation: job-widget-indeterminate 0.9s linear infinite;
+}
+
+.job-widget-fill.indeterminate.error {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--danger) 0 12px,
+    var(--bg-input) 12px 24px
+  );
+}
+
+@keyframes job-widget-indeterminate {
+  to {
+    background-position: 24px 0;
+  }
+}
+
 .job-widget-fill.error {
   background: var(--danger);
 }

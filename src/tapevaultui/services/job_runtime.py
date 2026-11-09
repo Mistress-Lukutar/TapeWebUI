@@ -196,24 +196,24 @@ class JobRuntime:
                 cancel_check=entry.cancel_event.is_set,
             )
         except JobCancelled as exc:
-            stats.state = "cancelled"
+            stats.set_state("cancelled")
             stats.error = str(exc)
             self._record_terminal(entry, "cancelled", str(exc))
         except TapeFullError as exc:
-            stats.state = "failed"
+            stats.set_state("failed")
             stats.error = f"{exc} (insert the next tape and retry)"
             self._record_terminal(entry, "waiting_media", str(exc))
         except BackupEngineError as exc:
-            stats.state = "failed"
+            stats.set_state("failed")
             stats.error = str(exc)
             self._record_terminal(entry, "failed", str(exc))
         except Exception as exc:
             logger.exception("job_run_crashed", job=entry.definition.name)
-            stats.state = "failed"
+            stats.set_state("failed")
             stats.error = str(exc)
             self._record_terminal(entry, "failed", str(exc))
         else:
-            stats.state = "done"
+            stats.set_state("done")
             if stats.error:
                 # e.g. readback verification damaged files: the job ran
                 # through, but the UI must not show a clean success.
@@ -240,8 +240,12 @@ class JobRuntime:
             entry: The finished queue entry.
             status: Terminal status.
             error: Error message, if any.
-            stats_json: Final stats payload for done runs.
+            stats_json: Final stats payload; None records the current
+                snapshot (write/verify phase durations included) so the
+                history also covers failed and cancelled runs.
         """
+        if stats_json is None:
+            stats_json = entry.stats.snapshot()
         self._catalog.update_job_run(
             entry.run_id,
             status=status,

@@ -11,9 +11,16 @@ export interface RuntimeJob {
   archived_files?: number
   bytes_total: number
   bytes_done: number
+  bytes_confirmed?: number
   current_file: string
   speed_bps: number
   eta_s: number | null
+  // True while no throughput is known yet (queue, preparation, first
+  // file writing, verify not started): the bar animates instead of
+  // showing a fake 0 %.
+  indeterminate?: boolean
+  write_elapsed_s?: number
+  verify_elapsed_s?: number
   error: string
   kind?: string
   hash_mismatches?: number

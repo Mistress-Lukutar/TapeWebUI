@@ -54,7 +54,7 @@ const { confirm } = useConfirm()
 
 const percent = computed(() => {
   const job = runtime.state.job
-  if (!job || !job.bytes_total) return null
+  if (!job || !job.bytes_total || job.indeterminate) return null
   return Math.min(100, Math.round((job.bytes_done / job.bytes_total) * 100))
 })
 
@@ -463,8 +463,8 @@ onMounted(load)
     <div class="job-widget-progress">
       <div
         class="job-widget-fill"
-        :class="{ error: runtime.state.job.error }"
-        :style="{ width: (percent ?? 0) + '%' }"
+        :class="{ error: runtime.state.job.error, indeterminate: percent === null }"
+        :style="{ width: (percent === null ? 100 : percent) + '%' }"
       />
     </div>
     <div class="kv-grid">
@@ -481,7 +481,7 @@ onMounted(load)
           }})</span>
       </dd>
       <dt>Bytes</dt><dd>{{ formatBytes(runtime.state.job.bytes_done) }} / {{ formatBytes(runtime.state.job.bytes_total) }}</dd>
-      <dt>Speed</dt><dd>{{ formatBytes(runtime.state.job.speed_bps) }}/s</dd>
+      <dt>Speed</dt><dd>{{ runtime.state.job.indeterminate ? '—' : formatBytes(runtime.state.job.speed_bps) + '/s' }}</dd>
       <dt>ETA</dt><dd>{{ formatDuration(runtime.state.job.eta_s) }}</dd>
       <dt>Current file</dt><dd>{{ runtime.state.job.current_file || '—' }}</dd>
       <template v-if="runtime.state.job.tape_label || runtime.state.job.tape_id">
