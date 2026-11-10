@@ -453,7 +453,7 @@ async def test_restore_archive_entry_extracts_tree(tmp_path: Path) -> None:
     (src / "nested" / "b.txt").write_bytes(b"BB")
     staged = plan_archive_source(
         SourceDef.model_validate({"path": str(src), "archive": True}),
-        staging_dir=tmp_path / "staging",
+        work_dir=tmp_path / "staging",
     )
     assert staged is not None
     zip_path = Path(staged.staging_path)

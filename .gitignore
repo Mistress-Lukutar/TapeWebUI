@@ -23,3 +23,6 @@ gui-test-screenshots/
 
 # Scratch scripts
 .tmp/
+
+# Windows reserved-name artifact from cmd redirects run under Git Bash
+nul

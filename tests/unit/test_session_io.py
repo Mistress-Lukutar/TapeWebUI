@@ -2,25 +2,30 @@
 File:   test_session_io.py
 Brief:  Session header I/O helper tests on the fake transport.
 Author: Mistress-Lukutar
-Date:   2026-11-08
-Version: v0.9.1
+Date:   2026-11-10
+Version: v0.9.2
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from tapevaultui.infrastructure.itdt_transport import FakeItDtTransport
+from tapevaultui.infrastructure.itdt_transport import (
+    FakeItDtTransport,
+    ItDtResult,
+)
 from tapevaultui.services.session_io import (
     NoMediaError,
     SessionIoError,
     erase_tape_short,
     identify_tape,
     new_session_id,
+    read_header_at_current_position,
     read_session_header,
     space_forward_files,
     space_to_end_of_data,
@@ -71,19 +76,144 @@ NO_MEDIA_REWIND_OUTPUT = (
 )
 
 
+class CapturingFakeItDtTransport(FakeItDtTransport):
+    """Fake transport that snapshots bytes written via write -raw -s.
+
+    Records the content of every temp file passed to a ``write -raw -s``
+    command in ``captured_write_bytes`` so tests can assert on the exact
+    payload without needing the file after cleanup.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.captured_write_bytes: list[bytes] = []  # type: ignore[assignment]
+
+    async def run(self, args: list[str], timeout_s: int | None = None) -> ItDtResult:
+        """Capture bytes from write -raw -s before delegating."""
+        if (
+            len(args) >= 4
+            and args[0] == "write"
+            and "-raw" in args
+            and "-s" in args
+        ):
+            idx = args.index("-s")
+            path = Path(args[idx + 1])
+            self.captured_write_bytes.append(path.read_bytes())
+        return await super().run(args, timeout_s)
+
+
 async def test_write_header_issues_single_write_command(tmp_path: Path) -> None:
     """Writing the header issues one write -raw followed by a filemark."""
-    fake = FakeItDtTransport()
-    await write_session_header(fake, _header(), tmp_path)
+    header = _header()
+    fake = CapturingFakeItDtTransport()
+    await write_session_header(fake, header, tmp_path)
+
     assert [cmd[0] for cmd in fake.commands] == ["write", "weof"]
     command = fake.commands[0]
     assert command[:3] == ("write", "-raw", "-s")
+
+    # Exactly one write -raw was issued and its payload matches.
+    assert len(fake.captured_write_bytes) == 1
+    snapshotted = fake.captured_write_bytes[0]
+    assert snapshotted == serialize_header(header)
+
+    # The temp file is cleaned up after the call (success path).
     header_file = Path(command[3])
-    assert header_file.exists()
-    parsed = parse_header(header_file.read_bytes())
+    assert not header_file.exists()
+
+    parsed = parse_header(snapshotted)
     assert parsed is not None
     assert parsed.tape_id == "tape-1"
     assert fake.commands[1] == ("weof", "1")
+
+
+async def test_write_header_nonzero_exit_deletes_temp(tmp_path: Path) -> None:
+    """A nonzero write exit raises SessionIoError and the temp file is deleted."""
+    header = _header()
+    fake = CapturingFakeItDtTransport(
+        scenarios={"write": ("Write failed", 1)},
+    )
+    with pytest.raises(SessionIoError, match="Write failed"):
+        await write_session_header(fake, header, tmp_path)
+
+    # The finally block removes the temp regardless of exit code.
+    assert len(fake.captured_write_bytes) == 1
+    for cmd in fake.commands:
+        if cmd[0] == "write" and "-s" in cmd:
+            header_file = Path(cmd[3])
+            assert not header_file.exists()
+
+
+async def test_read_session_header_rewind_raises_deletes_temp(
+    tmp_path: Path,
+) -> None:
+    """A rewind failure during read_session_header raises and no t0_*.bin remains."""
+    fake = FakeItDtTransport(scenarios={"rewind": (NO_MEDIA_REWIND_OUTPUT, 2)})
+
+    with (
+        patch(
+            "tapevaultui.services.session_io.rewind_tape",
+            new=AsyncMock(side_effect=NoMediaError("no medium")),
+        ),
+        pytest.raises(NoMediaError, match=r"no loaded medium|no medium"),
+    ):
+        await read_session_header(fake, tmp_path)
+
+    # No t0_*.bin should survive the finally block.
+    for f in tmp_path.glob("t0_*.bin"):
+        raise AssertionError(f"Leftover temp file: {f}")
+
+
+async def test_read_session_header_success_position_aware(tmp_path: Path) -> None:
+    """A position-aware fake returns the header and cleans up the read temp."""
+    header = _header()
+    serialized = serialize_header(header)
+    fake = FakeItDtTransport(tape_files=[serialized])
+
+    parsed = await read_session_header(fake, tmp_path)
+    assert parsed is not None
+    assert parsed.tape_id == "tape-1"
+    assert parsed.job_name == "photos"
+
+    # Verify the command sequence includes rewind + read + rewind.
+    cmd_names = [cmd[0] for cmd in fake.commands]
+    assert cmd_names == ["rewind", "read", "rewind"]
+
+    # No t0_*.bin leftover after successful read.
+    for f in tmp_path.glob("t0_*.bin"):
+        raise AssertionError(f"Leftover temp file: {f}")
+
+
+async def test_read_header_at_current_position_blank_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A blank-tape read at current position returns None with no leftover."""
+    fake = FakeItDtTransport(
+        scenarios={"read": (BLANK_READ_OUTPUT, 1117)},
+    )
+    parsed = await read_header_at_current_position(fake, tmp_path)
+    assert parsed is None
+
+    # No hdr_*.bin left after the call.
+    for f in tmp_path.glob("hdr_*.bin"):
+        raise AssertionError(f"Leftover temp file: {f}")
+
+
+async def test_read_header_at_current_position_success_no_leftover(
+    tmp_path: Path,
+) -> None:
+    """A successful read at current position returns the header with no leftover."""
+    header = _header()
+    serialized = serialize_header(header)
+    fake = FakeItDtTransport(scenarios={"read": (serialized.decode("utf-8"), 0)})
+
+    parsed = await read_header_at_current_position(fake, tmp_path)
+    assert parsed is not None
+    assert parsed.tape_id == "tape-1"
+
+    # No hdr_*.bin leftover.
+    for f in tmp_path.glob("hdr_*.bin"):
+        raise AssertionError(f"Leftover temp file: {f}")
 
 
 async def test_write_filemarks_issues_weof() -> None:

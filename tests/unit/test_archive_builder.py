@@ -1,6 +1,6 @@
 """
 File:   test_archive_builder.py
-Brief:  Archive source tests: manifest, staged zip cache, skip/rebuild,
+Brief:  Archive source tests: manifest, fresh zip build, skip/rebuild,
         extraction roundtrip.
 Author: Mistress-Lukutar
 Date:   2026-11-09
@@ -9,51 +9,21 @@ Version: v0.11.3
 
 from __future__ import annotations
 
-import json
 import os
 import time
 import zipfile
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from tapevaultui.services.archive_builder import (
     ArchiveError,
-    ArchiveManifest,
     extract_archive,
     manifest_digest,
     plan_archive_source,
 )
 from tapevaultui.services.job_defs import SourceDef
 from tapevaultui.services.snapshot import SnapshotError, sha256_of
-
-
-def _counting_sha256_of(
-    real_fn: Callable[[Path], str], monkeypatch: pytest.MonkeyPatch
-) -> list[Path]:
-    """Record every ``sha256_of`` call path in both patched modules.
-
-    ``_walk_source`` imports ``sha256_of`` at module level from
-    ``tapevaultui.services.snapshot``, so patching only
-    ``archive_builder.sha256_of`` misses calls inside the walk.
-
-    Args:
-        real_fn: The original ``sha256_of`` function.
-        monkeypatch: Pytest monkeypatch fixture.
-
-    Returns:
-        List of paths passed to ``sha256_of`` during the patch.
-    """
-    calls: list[Path] = []
-
-    def counting(path: Path) -> str:
-        calls.append(Path(path))
-        return real_fn(path)
-
-    monkeypatch.setattr("tapevaultui.services.snapshot.sha256_of", counting)
-    monkeypatch.setattr("tapevaultui.services.archive_builder.sha256_of", counting)
-    return calls
 
 
 def _source(tmp_path: Path, archive: bool = True) -> SourceDef:
@@ -92,7 +62,7 @@ def test_plan_builds_zip_with_content_and_mtime(tmp_path: Path) -> None:
     """The staged zip holds the tree uncompressed with restored mtimes."""
     src = _make_tree(tmp_path)
     src.joinpath("a.txt").touch()
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
 
     assert entry is not None
     assert entry.kind == "archive"
@@ -129,7 +99,7 @@ def test_plan_honors_excludes(tmp_path: Path) -> None:
             "excludes": ["nested/", "*.log"],
         }
     )
-    entry = plan_archive_source(source, staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(source, work_dir=tmp_path / "work")
     assert entry is not None
     with zipfile.ZipFile(entry.staging_path) as zf:
         assert zf.namelist() == ["a.txt"]
@@ -138,45 +108,27 @@ def test_plan_honors_excludes(tmp_path: Path) -> None:
 def test_plan_incremental_skips_unchanged_source(tmp_path: Path) -> None:
     """A matching written manifest hash skips the source entirely."""
     _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    first = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
     assert first is not None
 
     second = plan_archive_source(
         _source(tmp_path),
-        staging_dir=tmp_path / "staging",
+        work_dir=tmp_path / "work",
         written_manifest_sha=first.manifest_sha,
     )
     assert second is None
 
 
-def test_plan_full_reuses_cached_zip_but_returns_entry(tmp_path: Path) -> None:
-    """Full runs skip the rebuild but still plan the archive for tape."""
-    _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
-    assert first is not None
-    zip_mtime = Path(first.staging_path).stat().st_mtime
-
-    second = plan_archive_source(
-        _source(tmp_path),
-        staging_dir=tmp_path / "staging",
-        written_manifest_sha=first.manifest_sha,
-        write_even_if_unchanged=True,
-    )
-    assert second is not None
-    assert second.sha256 == first.sha256  # cache reused, not rebuilt
-    assert Path(second.staging_path).stat().st_mtime == zip_mtime
-
-
 def test_plan_rebuilds_when_content_changes(tmp_path: Path) -> None:
     """Changed content produces a new manifest hash and a rebuilt zip."""
     _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    first = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
     assert first is not None
 
     (tmp_path / "src" / "nested" / "c.txt").write_bytes(b"C")
     second = plan_archive_source(
         _source(tmp_path),
-        staging_dir=tmp_path / "staging",
+        work_dir=tmp_path / "work",
         written_manifest_sha=first.manifest_sha,
     )
     assert second is not None
@@ -188,24 +140,71 @@ def test_plan_rebuilds_when_content_changes(tmp_path: Path) -> None:
 def test_rebuild_is_deterministic(tmp_path: Path) -> None:
     """Identical content builds byte-identical zips."""
     _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    work = tmp_path / "work"
+    first = plan_archive_source(_source(tmp_path), work_dir=work)
     assert first is not None
     zip_bytes = Path(first.staging_path).read_bytes()
 
-    # Force a rebuild by wiping the manifest (cache miss).
-    (tmp_path / "staging").glob("*.manifest.json")
-    for manifest in (tmp_path / "staging").glob("*.manifest.json"):
-        manifest.unlink()
-    second = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    # Force a rebuild by deleting the existing archive zip.
+    for z in work.glob("archive_*.zip"):
+        z.unlink()
+    second = plan_archive_source(_source(tmp_path), work_dir=work)
     assert second is not None
     assert Path(second.staging_path).read_bytes() == zip_bytes
+
+
+def test_plan_writes_fresh_zip_into_work_dir(tmp_path: Path) -> None:
+    """After a successful plan, exactly one archive_*.zip exists in work_dir,
+    staging_path points at it, and no *.manifest.json is present.
+    """
+    _make_tree(tmp_path)
+    work = tmp_path / "work"
+    entry = plan_archive_source(_source(tmp_path), work_dir=work)
+
+    assert entry is not None
+    zip_files = list(work.glob("archive_*.zip"))
+    assert len(zip_files) == 1
+    assert Path(entry.staging_path).resolve() == zip_files[0].resolve()
+    manifest_files = list(work.glob("*.manifest.json"))
+    assert len(manifest_files) == 0
+
+
+def test_plan_overwrites_leftover_zip_on_replan(tmp_path: Path) -> None:
+    """A stale junk zip at the expected path is replaced on a subsequent plan
+    with changed content.
+    """
+    from tapevaultui.services.archive_builder import _source_slug
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"OLD")
+    source = SourceDef.model_validate(
+        {"path": str(src), "archive": True, "excludes": []}
+    )
+    work = tmp_path / "work"
+    slug = _source_slug(str(src))
+
+    # First plan creates the zip.
+    first = plan_archive_source(source, work_dir=work)
+    assert first is not None
+
+    # Overwrite with junk bytes.
+    zip_path = work / f"archive_{slug}.zip"
+    zip_path.write_bytes(b"junk content")
+
+    # Change the source and re-plan.
+    (src / "a.txt").write_bytes(b"NEW")
+    second = plan_archive_source(source, work_dir=work)
+    assert second is not None
+    with zipfile.ZipFile(second.staging_path) as zf:
+        assert zf.read("a.txt") == b"NEW"
 
 
 def test_plan_empty_source_returns_none(tmp_path: Path) -> None:
     """A source with no included files plans nothing."""
     (tmp_path / "src").mkdir()
     assert (
-        plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging") is None
+        plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work") is None
     )
 
 
@@ -215,21 +214,19 @@ def test_plan_missing_source_raises(tmp_path: Path) -> None:
         {"path": str(tmp_path / "missing"), "archive": True}
     )
     with pytest.raises(SnapshotError):
-        plan_archive_source(source, staging_dir=tmp_path / "staging")
+        plan_archive_source(source, work_dir=tmp_path / "work")
 
 
-def test_manifest_roundtrip(tmp_path: Path) -> None:
-    """Manifest serialization is lossless and content-hash stable."""
+def test_manifest_digest_stable_for_same_entries() -> None:
+    """manifest_digest produces identical output for identical entry sets."""
     entries = {
         "a.txt": (4, 1700000000.0, "f" * 64),
         "nested/b.txt": (2, 1700000001.0, "0" * 64),
     }
-    manifest = ArchiveManifest(entries, manifest_digest(entries))
-    parsed = ArchiveManifest.from_bytes(manifest.serialize())
-    assert parsed.entries == entries
-    assert parsed.manifest_sha == manifest.manifest_sha
-    with pytest.raises(ArchiveError):
-        ArchiveManifest.from_bytes(b"not json")
+    d1 = manifest_digest(entries)
+    d2 = manifest_digest(entries)
+    assert d1 == d2
+    assert len(d1) == 64
 
 
 def test_manifest_digest_reflects_content(tmp_path: Path) -> None:
@@ -245,7 +242,7 @@ def test_manifest_digest_reflects_content(tmp_path: Path) -> None:
 def test_extract_roundtrip_restores_content(tmp_path: Path) -> None:
     """Extraction recreates the tree with content and mtimes."""
     src = _make_tree(tmp_path)
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
     assert entry is not None
 
     target = tmp_path / "restored"
@@ -278,21 +275,6 @@ def test_extract_rejects_corrupt_zip(tmp_path: Path) -> None:
         extract_archive(bad, tmp_path / "out")
 
 
-def test_cached_manifest_corruption_triggers_rebuild(tmp_path: Path) -> None:
-    """A corrupt sidecar manifest falls back to a fresh build."""
-    _make_tree(tmp_path)
-    staging = tmp_path / "staging"
-    first = plan_archive_source(_source(tmp_path), staging_dir=staging)
-    assert first is not None
-    manifest_files = list(staging.glob("*.manifest.json"))
-    assert len(manifest_files) == 1
-    manifest_files[0].write_bytes(b"corrupt")
-
-    second = plan_archive_source(_source(tmp_path), staging_dir=staging)
-    assert second is not None
-    assert second.sha256 == first.sha256  # rebuilt to identical bytes
-
-
 def test_mtimes_beyond_zip_range_are_clamped(tmp_path: Path) -> None:
     """Out-of-range mtimes cannot break the zip build."""
     src = tmp_path / "src"
@@ -302,7 +284,7 @@ def test_mtimes_beyond_zip_range_are_clamped(tmp_path: Path) -> None:
     past = time.time() - 60 * 60 * 24 * 365 * 60  # ~60 years ago
     os.utime(target, (past, past))
 
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
     assert entry is not None
     with zipfile.ZipFile(entry.staging_path) as zf:
         assert zf.testzip() is None
@@ -353,7 +335,7 @@ def test_build_zip_streams_instead_of_whole_file_reads(
         return _BoundedOnly(handle)
 
     monkeypatch.setattr(Path, "open", guarded_open)
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
 
     assert entry is not None
     assert entry.inner_count == 1
@@ -413,140 +395,6 @@ def test_build_zip_enables_zip64_for_large_entries(
         assert zf.read("big.bin") == expected
 
 
-def test_plan_build_stores_zip_sha_in_manifest(tmp_path: Path) -> None:
-    """A fresh build writes the zip SHA-256 into the sidecar manifest."""
-    _make_tree(tmp_path)
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
-    assert entry is not None
-
-    # Parse the staging manifest JSON and verify zip_sha256 matches.
-    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
-    assert len(manifest_files) == 1
-    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
-    assert parsed.zip_sha256 is not None
-    assert parsed.zip_sha256 == entry.sha256
-    assert parsed.zip_sha256 == sha256_of(Path(entry.staging_path))
-
-
-def test_plan_reuse_uses_stored_hash_without_reading_zip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cached-reuse path returns the stored hash without re-reading the zip."""
-    _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
-    assert first is not None
-
-    # Tamper with the zip bytes while leaving the manifest intact.
-    zip_path = Path(first.staging_path)
-    zip_path.write_bytes(b"tampered")
-
-    # Record every sha256_of call — reuse must NOT read the zip.
-    calls = _counting_sha256_of(sha256_of, monkeypatch)
-
-    second = plan_archive_source(
-        _source(tmp_path),
-        staging_dir=tmp_path / "staging",
-        written_manifest_sha=first.manifest_sha,
-        write_even_if_unchanged=True,
-    )
-    assert second is not None
-    # Returned sha must be the stored hash (first.sha256), NOT the tampered file's.
-    assert second.sha256 == first.sha256
-    # Sanity: the tampered zip hashes differently, proving we got the original.
-    assert second.sha256 != sha256_of(Path(second.staging_path))
-    # The zip path was never passed to sha256_of during reuse.
-    assert Path(first.staging_path) not in calls
-
-
-def test_plan_legacy_manifest_backfills_zip_sha(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A legacy manifest (no zip_sha256 key) triggers one-time backfill."""
-    _make_tree(tmp_path)
-    first = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
-    assert first is not None
-
-    # Rewrite the manifest as LEGACY bytes — manually omit zip_sha256.
-    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
-    assert len(manifest_files) == 1
-    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
-    legacy_json = json.dumps(
-        {"entries": parsed.entries, "manifest_sha": parsed.manifest_sha}
-    ).encode("utf-8")
-    manifest_files[0].write_bytes(legacy_json)
-
-    # Plan again — reuse path should detect legacy and backfill.
-    calls = _counting_sha256_of(sha256_of, monkeypatch)
-    second = plan_archive_source(
-        _source(tmp_path),
-        staging_dir=tmp_path / "staging",
-        written_manifest_sha=first.manifest_sha,
-        write_even_if_unchanged=True,
-    )
-    assert second is not None
-    # The fallback computed the real zip hash.
-    expected_hash = sha256_of(Path(first.staging_path))
-    assert second.sha256 == expected_hash
-
-    # Manifest file now contains the backfilled zip_sha256.
-    re_parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
-    assert re_parsed.zip_sha256 == expected_hash
-
-    # The legacy path triggered exactly one sha256_of of the zip (the backfill).
-    assert calls.count(Path(first.staging_path)) == 1
-
-    # Overwrite zip bytes again and verify subsequent reuse does NOT call sha256_of.
-    Path(first.staging_path).write_bytes(b"tampered")
-
-    calls2 = _counting_sha256_of(sha256_of, monkeypatch)
-
-    third = plan_archive_source(
-        _source(tmp_path),
-        staging_dir=tmp_path / "staging",
-        written_manifest_sha=re_parsed.manifest_sha,
-        write_even_if_unchanged=True,
-    )
-    assert third is not None
-    assert third.sha256 == expected_hash  # backfilled hash reused
-    # After backfill the stored hash is used — zip path never read again.
-    assert Path(first.staging_path) not in calls2
-
-
-def test_archive_manifest_zip_sha_roundtrip_and_legacy_parse() -> None:
-    """ArchiveManifest serialises with zip_sha256; legacy parses as None."""
-    entries = {
-        "a.txt": (4, 1700000000.0, "f" * 64),
-        "nested/b.txt": (2, 1700000001.0, "0" * 64),
-    }
-    digest = manifest_digest(entries)
-    zip_sha = "a" * 64
-
-    manifest = ArchiveManifest(entries, digest, zip_sha)
-    roundtrip = ArchiveManifest.from_bytes(manifest.serialize())
-    assert roundtrip.zip_sha256 == zip_sha
-    assert roundtrip.entries == entries
-    assert roundtrip.manifest_sha == digest
-
-    # The serialized JSON contains the key.
-    payload = json.loads(manifest.serialize().decode("utf-8"))
-    assert "zip_sha256" in payload
-    assert payload["zip_sha256"] == zip_sha
-
-    # Legacy JSON without the key parses as None.
-    legacy_bytes = json.dumps(
-        {"entries": entries, "manifest_sha": digest}
-    ).encode("utf-8")
-    legacy_parsed = ArchiveManifest.from_bytes(legacy_bytes)
-    assert legacy_parsed.zip_sha256 is None
-
-    # Non-string zip_sha256 values are coerced to None.
-    bad_bytes = json.dumps(
-        {"entries": entries, "manifest_sha": digest, "zip_sha256": 123}
-    ).encode("utf-8")
-    bad_parsed = ArchiveManifest.from_bytes(bad_bytes)
-    assert bad_parsed.zip_sha256 is None
-
-
 def test_walk_skips_file_vanished_before_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -565,7 +413,7 @@ def test_walk_skips_file_vanished_before_hash(
     monkeypatch.setattr(
         "tapevaultui.services.archive_builder.sha256_of", vanishing_sha256_of
     )
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
 
     assert entry is not None
     assert entry.inner_count == 1  # a.txt skipped, nested/b.txt remains
@@ -577,7 +425,7 @@ def test_plan_rebuilds_after_file_vanishes_during_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A file deleted after the walk (mid zip-stream) triggers exactly one
-    re-walk + rebuild so the sidecar manifest matches the written zip.
+    re-walk + rebuild so the archive is consistent.
     """
     from tapevaultui.services.archive_builder import _build_zip
 
@@ -596,14 +444,11 @@ def test_plan_rebuilds_after_file_vanishes_during_build(
     monkeypatch.setattr(
         "tapevaultui.services.archive_builder._build_zip", flaky_build
     )
-    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+    entry = plan_archive_source(_source(tmp_path), work_dir=tmp_path / "work")
 
     assert entry is not None
     assert builds["count"] == 2  # one retry, not a loop
     assert entry.inner_count == 1
     with zipfile.ZipFile(entry.staging_path) as zf:
         assert zf.namelist() == ["a.txt"]
-    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
-    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
-    assert sorted(parsed.entries) == ["a.txt"]  # manifest matches the zip
     assert not Path(entry.staging_path).with_suffix(".zip.tmp").exists()

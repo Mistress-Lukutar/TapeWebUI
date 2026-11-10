@@ -973,3 +973,186 @@ def test_looks_like_eom_word_boundaries() -> None:
     assert _looks_like_eom("Early warning zone reached")
     assert not _looks_like_eom("Write failed: medium error 0x31090002")
     assert not _looks_like_eom("Write failed: pseudoeom garbage")
+
+
+# -- archive zip lifecycle ---------------------------------------------------
+
+
+async def test_archive_zip_removed_from_work_dir_after_write(tmp_path: Path) -> None:
+    """Archive zips are deleted from the work dir after a successful write.
+
+    The engine builds a fresh ``archive_*.zip`` during planning, writes it
+    to tape via ``write -raw -s <staging_path>``, then calls
+    ``_discard_staged_zip`` on success. After execute returns the work dir
+    must contain no archive zips.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(_archive_definition(tmp_path), stats)
+
+    # The write command targeted a staging path matching archive_*.zip.
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    assert any(w[3].endswith(".zip") for w in writes)
+    # After execute returns no archive zip survives in the work dir.
+    zips = list((tmp_path / "work").glob("archive_*.zip"))
+    assert zips == [], f"expected no archive zips, found {[p.name for p in zips]}"
+
+
+async def test_archive_zip_removed_after_damaged_continue(tmp_path: Path) -> None:
+    """A failed archive write with continue_on_error deletes the zip.
+
+    When the ITDT ``write`` command returns a non-zero exit code and
+    ``continue_on_error=True``, the engine marks the file damaged, calls
+    ``_discard_staged_zip(file)``, and continues to the next file. The
+    archive zip must not survive in the work dir.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(_archive_definition(tmp_path), stats)
+
+    # Identify the archive write command to build a failing scenario.
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    archive_write = next(w for w in writes if w[3].endswith(".zip"))
+    archive_key = tuple(archive_write)
+
+    # Run again with the archive write failing (full run so zip is rebuilt).
+    fake2 = FakeItDtTransport(
+        command_scenarios={archive_key: ("Write failed: medium error", 1)},
+    )
+    engine2 = BackupEngine(fake2, repo, tmp_path / "work", EventBus())
+    await engine2.execute(
+        _archive_definition(tmp_path, backup_type="full"),
+        BackupStats("testjob"),
+    )
+
+    # Catalog shows the archive as damaged.
+    tape = repo.list_tapes()[-1]  # latest tape from second execute
+    sessions = repo.list_sessions(tape.id)
+    files = repo.list_files(sessions[-1].id)  # latest session on that tape
+    archive_entry = next(f for f in files if f.kind == "archive")
+    assert archive_entry.status == "damaged"
+    # No archive zip left in the work dir.
+    zips = list((tmp_path / "work").glob("archive_*.zip"))
+    assert zips == [], f"expected no archive zips, found {[p.name for p in zips]}"
+
+
+async def test_archive_zip_kept_across_tape_full_then_written(
+    tmp_path: Path,
+) -> None:
+    """The archive zip survives EOM and is deleted after retry succeeds.
+
+    When an archive write hits end-of-medium the engine calls
+    ``wait_for_media`` and returns from ``_write_tape_pass`` **without**
+    calling ``_discard_staged_zip``, so the cut-off file keeps its zip
+    and is retried on the next tape within the same execute. The callback
+    must see the zip, then a subsequent write succeeds and the zip is
+    finally deleted.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+
+    repo = _make_repo()
+    fake = FakeItDtTransport()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    stats = BackupStats("testjob")
+    await engine.execute(_archive_definition(tmp_path), stats)
+
+    # Identify the archive write command to build an EOM scenario.
+    writes = [cmd for cmd in fake.commands if cmd[0] == "write"]
+    archive_write = next(w for w in writes if w[3].endswith(".zip"))
+    archive_key = tuple(archive_write)
+
+    call_count = 0
+
+    fake2 = FakeItDtTransport(
+        command_scenarios={
+            archive_key: ("Error: end of data detected", 1),
+        },
+    )
+
+    async def wait_for_media() -> bool:
+        nonlocal call_count
+        call_count += 1
+        work_dir = tmp_path / "work"
+        if call_count == 1:
+            # First wait: the archive zip must still exist (retention point).
+            zips = list(work_dir.glob("archive_*.zip"))
+            assert zips, "archive zip must survive EOM until next write"
+            # Clear fake2's scenarios so the retry succeeds with default response.
+            fake2.command_scenarios.clear()
+            return True
+        return False
+
+    engine2 = BackupEngine(fake2, repo, tmp_path / "work", EventBus())
+    await engine2.execute(
+        _archive_definition(tmp_path, backup_type="full"),
+        BackupStats("testjob"),
+        wait_for_media=wait_for_media,
+    )
+
+    # The archive was eventually written successfully.
+    tape = repo.list_tapes()[-1]  # latest tape from second execute
+    sessions = repo.list_sessions(tape.id)
+    files = repo.list_files(sessions[-1].id)  # latest session on that tape
+    archive_entry = next(f for f in files if f.kind == "archive")
+    assert archive_entry.status == "ok"
+    # No archive zip left after the successful retry write.
+    zips = list((tmp_path / "work").glob("archive_*.zip"))
+    assert zips == [], f"expected no archive zips, found {[p.name for p in zips]}"
+
+
+async def test_verify_buffer_deleted_when_hashing_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verify read-back buffer is deleted even when sha256_of raises.
+
+    With the default ``direct_reader_factory=None`` the engine uses the
+    legacy ITDT fallback path: it reads into ``verify_<index>.bin``, calls
+    ``sha256_of(dest)`` via ``asyncio.to_thread``, then unlinks ``dest`` in a
+    ``finally`` block. Patching ``sha256_of`` to raise must not leave the
+    buffer behind.
+    """
+    content = b"verify-buffer-test-content"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(content)
+
+    # Fake read returns the same content so the ITDT fallback read succeeds.
+    fake = FakeItDtTransport(scenarios={"read": (content.decode(), 0)})
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+
+    def _sha256_raises(_path: Path) -> str:
+        buf = list((tmp_path / "work").glob("verify_*.bin"))
+        assert buf, "verify buffer must exist when sha256_of is called"
+        raise RuntimeError("hashing failed")
+
+    # Patch the module-level attribute used by _verify_pass ITDT branch.
+    from tapevaultui.services import backup_engine as be_mod
+
+    monkeypatch.setattr(be_mod, "sha256_of", _sha256_raises)
+
+    stats = BackupStats("testjob")
+    with pytest.raises(RuntimeError, match="hashing failed"):
+        await engine.execute(
+            # Force full run and readback verify so sha256_of is called.
+            _archive_definition(tmp_path, backup_type="full", verify="readback"),
+            stats,
+        )
+
+    # The finally block must have deleted the buffer.
+    bufs = list((tmp_path / "work").glob("verify_*.bin"))
+    assert bufs == [], f"expected no verify buffers, found {[p.name for p in bufs]}"

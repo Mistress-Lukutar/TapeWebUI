@@ -36,6 +36,7 @@ from tapevaultui.services.catalog import (
     CatalogRepository,
 )
 from tapevaultui.services.event_bus import EventBus
+from tapevaultui.services.housekeeping import STALE_AGE_S, sweep_tmp
 from tapevaultui.services.job_defs import JobDefinition, SourceDef
 from tapevaultui.services.session_io import (
     NoMediaError,
@@ -278,7 +279,6 @@ class BackupEngine:
         catalog: CatalogRepository,
         work_dir: Path,
         event_bus: EventBus,
-        staging_dir: Path | None = None,
         direct_reader_factory: Callable[[str], DirectTapeReader] | None = None,
     ) -> None:
         """Initialize the engine.
@@ -286,11 +286,9 @@ class BackupEngine:
         Args:
             transport: ITDT transport (real or fake).
             catalog: Catalog repository.
-            work_dir: Directory for temp files (headers, verify downloads).
+            work_dir: Directory for temp files (headers, verify
+                downloads, freshly built archive zips).
             event_bus: Bus for job progress publications.
-            staging_dir: Persistent cache directory for archive-source
-                zips + manifests (defaults to <data>/staging, derived
-                from work_dir).
             direct_reader_factory: Factory for DirectTapeReader on Windows
                 (None = legacy ITDT-only verify; tests pass None by default
                 so they never touch hardware).
@@ -298,7 +296,6 @@ class BackupEngine:
         self._transport = transport
         self._catalog = catalog
         self._work_dir = work_dir
-        self._staging_dir = staging_dir or work_dir.parent / "staging"
         self._event_bus = event_bus
         self._direct_reader_factory = direct_reader_factory
 
@@ -327,9 +324,10 @@ class BackupEngine:
         incremental run with no changes touches no tape at all.
 
         Archive sources (``archive: true``) contribute one entry each:
-        the whole tree is staged as a zip in the staging cache, and an
-        incremental run skips the source entirely while its content
-        manifest hash matches the newest archive already written.
+        the whole tree is zipped fresh into the work dir, written to
+        tape, and the local zip is deleted; an incremental run skips
+        the source entirely while its content manifest hash matches
+        the newest archive already written.
 
         Args:
             definition: The job to execute.
@@ -347,6 +345,16 @@ class BackupEngine:
         """
         stats.set_state("preparing")
         await self.publish(stats)
+        # Sweep crash/cancel leftovers (verify buffers, orphaned archive
+        # zips, ...) before this run starts producing new ones. The age
+        # floor keeps files that may still belong to an overlapping
+        # API-side drive operation (verify/restore guards are
+        # check-then-act) untouched.
+        removed, freed_bytes = await asyncio.to_thread(
+            sweep_tmp, self._work_dir, min_age_s=STALE_AGE_S
+        )
+        if removed:
+            logger.info("job_start_sweep", files=removed, bytes=freed_bytes)
 
         kind, baseline = self._decide_kind_and_baseline(definition)
         plain_sources = [s for s in definition.sources if not s.archive]
@@ -467,7 +475,7 @@ class BackupEngine:
                     return await asyncio.to_thread(
                         plan_archive_source,
                         source,
-                        staging_dir=self._staging_dir,
+                        work_dir=self._work_dir,
                         written_manifest_sha=manifest_sha or None,
                         write_even_if_unchanged=kind == "full",
                     )
@@ -500,6 +508,22 @@ class BackupEngine:
             if result is not None:
                 planned.append(result)
         return planned
+
+    def _discard_staged_zip(self, file: PlannedFile) -> None:
+        """Delete the freshly built archive zip after a terminal outcome.
+
+        The zip is a per-run temp file: once the entry is written (or
+        terminally failed) this run will never use it again, so free
+        the disk immediately. Deliberately NOT called on the tape-full
+        path — a cut-off file keeps its zip and is rewritten to the
+        next tape within the same run.
+
+        Args:
+            file: The planned entry whose staging zip to discard.
+        """
+        if file.kind != "archive" or file.staging_path is None:
+            return
+        Path(file.staging_path).unlink(missing_ok=True)
 
     async def _write_tape_pass(
         self,
@@ -692,6 +716,7 @@ class BackupEngine:
                     inner_count=file.inner_count,
                     manifest_sha=file.manifest_sha,
                 )
+                self._discard_staged_zip(file)
                 if definition.options.continue_on_error:
                     logger.warning("backup_file_damaged", path=file.path, output=stdout)
                     files_processed += 1
@@ -711,6 +736,7 @@ class BackupEngine:
                 inner_count=file.inner_count,
                 manifest_sha=file.manifest_sha,
             )
+            self._discard_staged_zip(file)
             physical_offset += 1
             files_processed += 1
             stats.files_done += 1
@@ -944,28 +970,32 @@ class BackupEngine:
                         await self.publish(stats)
                         continue
                     dest = self._work_dir / f"verify_{tape_index}.bin"
-                    result = await self._transport.run(
-                        ["read", "-d", str(dest)],
-                        timeout_s=timeout_for_size(
-                            file.size, self._transport.default_timeout_s
-                        ),
-                    )
-                    if result.exit_code != 0:
-                        dest.unlink(missing_ok=True)
-                        self._catalog.mark_file_status(ver_entry.id, "damaged")
-                        stats.hash_mismatches += 1
-                        damaged += 1
-                        logger.warning(
-                            "verify_read_failed",
-                            path=file.path,
-                            tape_index=tape_index,
-                            output=result.stdout.strip(),
+                    try:
+                        result = await self._transport.run(
+                            ["read", "-d", str(dest)],
+                            timeout_s=timeout_for_size(
+                                file.size, self._transport.default_timeout_s
+                            ),
                         )
-                        # The head position is no longer trustworthy: stop the
-                        # pass instead of comparing the wrong tape files.
-                        break
-                    actual = await asyncio.to_thread(sha256_of, dest)
-                    dest.unlink(missing_ok=True)
+                        if result.exit_code != 0:
+                            self._catalog.mark_file_status(ver_entry.id, "damaged")
+                            stats.hash_mismatches += 1
+                            damaged += 1
+                            logger.warning(
+                                "verify_read_failed",
+                                path=file.path,
+                                tape_index=tape_index,
+                                output=result.stdout.strip(),
+                            )
+                            # The head position is no longer trustworthy: stop the
+                            # pass instead of comparing the wrong tape files.
+                            break
+                        actual = await asyncio.to_thread(sha256_of, dest)
+                    finally:
+                        # Always free the read-back buffer: hashing
+                        # failures or cancellation must not leave a
+                        # multi-GB file in the work dir.
+                        dest.unlink(missing_ok=True)
                     if actual != file.sha256:
                         self._catalog.mark_file_status(ver_entry.id, "damaged")
                         stats.hash_mismatches += 1

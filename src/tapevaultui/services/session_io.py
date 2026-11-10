@@ -107,13 +107,18 @@ async def write_session_header(
     temp_file = work_dir / f"header_{header.session_id[:8]}.json"
     temp_file.write_bytes(serialize_header(header))
 
-    result = await transport.run(["write", "-raw", "-s", str(temp_file)])
-    if result.exit_code != 0:
-        raise SessionIoError(
-            f"ITDT write of session header failed: {result.stdout.strip()}"
-        )
-    logger.info("session_header_written", session_id=header.session_id)
-    await write_filemarks(transport)
+    try:
+        result = await transport.run(["write", "-raw", "-s", str(temp_file)])
+        if result.exit_code != 0:
+            raise SessionIoError(
+                f"ITDT write of session header failed: {result.stdout.strip()}"
+            )
+        logger.info("session_header_written", session_id=header.session_id)
+        await write_filemarks(transport)
+    finally:
+        # The temp header is disposable once the write command consumed
+        # it (or failed); without this, one JSON leaked per session.
+        temp_file.unlink(missing_ok=True)
 
 
 async def write_filemarks(
@@ -199,27 +204,26 @@ async def read_session_header(
     work_dir.mkdir(parents=True, exist_ok=True)
     temp_file = work_dir / f"t0_{uuid.uuid4().hex[:8]}.bin"
 
-    await rewind_tape(transport)
-    result = await transport.run(["read", "-d", str(temp_file)])
-    if result.exit_code != 0:
-        stdout = result.stdout.strip()
-        await rewind_tape(transport)
-        if temp_file.exists():
-            temp_file.unlink()
-        lowered = stdout.lower()
-        if (
-            "filemark" in lowered
-            or "end of data" in lowered
-            or _looks_like_blank_read(stdout)
-        ):
-            return None  # blank / foreign tape: nothing readable at BOP
-        raise SessionIoError(f"ITDT read of session header failed: {stdout}")
-
     try:
+        await rewind_tape(transport)
+        result = await transport.run(["read", "-d", str(temp_file)])
+        if result.exit_code != 0:
+            stdout = result.stdout.strip()
+            await rewind_tape(transport)
+            lowered = stdout.lower()
+            if (
+                "filemark" in lowered
+                or "end of data" in lowered
+                or _looks_like_blank_read(stdout)
+            ):
+                return None  # blank / foreign tape: nothing readable at BOP
+            raise SessionIoError(f"ITDT read of session header failed: {stdout}")
+
         raw = temp_file.read_bytes()
     finally:
-        if temp_file.exists():
-            temp_file.unlink()
+        # Covers every exit: read failure, a rewind raising before the
+        # read, parse-time cancellation — no multi-GB leftovers.
+        temp_file.unlink(missing_ok=True)
 
     await rewind_tape(transport)
     header = parse_header(raw)
@@ -253,24 +257,21 @@ async def read_header_at_current_position(
     work_dir.mkdir(parents=True, exist_ok=True)
     temp_file = work_dir / f"hdr_{uuid.uuid4().hex[:8]}.bin"
 
-    result = await transport.run(["read", "-d", str(temp_file)])
-    if result.exit_code != 0:
-        stdout = result.stdout.strip()
-        if temp_file.exists():
-            temp_file.unlink()
-        if (
-            "filemark" in stdout.lower()
-            or "end of data" in stdout.lower()
-            or _looks_like_blank_read(stdout)
-        ):
-            return None  # nothing readable at this position
-        raise SessionIoError(f"ITDT read of session header failed: {stdout}")
-
     try:
+        result = await transport.run(["read", "-d", str(temp_file)])
+        if result.exit_code != 0:
+            stdout = result.stdout.strip()
+            if (
+                "filemark" in stdout.lower()
+                or "end of data" in stdout.lower()
+                or _looks_like_blank_read(stdout)
+            ):
+                return None  # nothing readable at this position
+            raise SessionIoError(f"ITDT read of session header failed: {stdout}")
+
         raw = temp_file.read_bytes()
     finally:
-        if temp_file.exists():
-            temp_file.unlink()
+        temp_file.unlink(missing_ok=True)
 
     return parse_header(raw)
 

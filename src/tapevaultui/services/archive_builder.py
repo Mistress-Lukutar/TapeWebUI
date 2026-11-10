@@ -1,6 +1,6 @@
 """
 File:   archive_builder.py
-Brief:  Archive sources: content manifest, staged zip cache, skip/rebuild.
+Brief:  Archive sources: per-run zip build, skip/rebuild, tape-safe extract.
 Author: Mistress-Lukutar
 Date:   2026-11-09
 Version: v0.11.3
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -149,75 +148,6 @@ class _HashingWriter:
         return self._digest.hexdigest()
 
 
-class ArchiveManifest:
-    """Content manifest of one archive source.
-
-    Maps relative posix paths to (size, mtime, sha256); the manifest
-    hash identifies the exact content, so an unchanged manifest means
-    the previously written archive is still current.
-    """
-
-    def __init__(
-        self,
-        entries: dict[str, tuple[int, float, str]],
-        manifest_sha: str,
-        zip_sha256: str | None = None,
-    ) -> None:
-        """Store the entries and their content hash.
-
-        Args:
-            entries: Mapping relative path -> (size, mtime, sha256).
-            manifest_sha: Content hash over the sorted entries.
-            zip_sha256: SHA-256 of the built zip file bytes; None for
-                legacy manifests that lack this field.
-        """
-        self.entries = entries
-        self.manifest_sha = manifest_sha
-        self.zip_sha256 = zip_sha256
-
-    @classmethod
-    def from_bytes(cls, raw: bytes) -> ArchiveManifest:
-        """Parse a serialized manifest.
-
-        Args:
-            raw: UTF-8 JSON bytes as written by ``serialize``.
-
-        Returns:
-            The parsed manifest.
-
-        Raises:
-            ArchiveError: If the manifest is corrupt.
-        """
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-            entries = payload["entries"]
-            zip_sha256 = payload.get("zip_sha256")
-            if not isinstance(zip_sha256, str):
-                zip_sha256 = None
-            return cls(
-                {k: (v[0], v[1], v[2]) for k, v in entries.items()},
-                payload["manifest_sha"],
-                zip_sha256,
-            )
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ArchiveError(f"Corrupt archive manifest: {exc}") from exc
-
-    def serialize(self) -> bytes:
-        """Serialize to canonical UTF-8 JSON bytes.
-
-        Returns:
-            Compact JSON with sorted keys (stable manifest_sha).
-        """
-        return json.dumps(
-            {
-                "entries": self.entries,
-                "manifest_sha": self.manifest_sha,
-                "zip_sha256": self.zip_sha256,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-
-
 def manifest_digest(entries: dict[str, tuple[int, float, str]]) -> str:
     """Hash the manifest content (path, size, mtime, sha256 per file).
 
@@ -320,8 +250,9 @@ def _build_zip(
     (deterministic bytes for identical content). File bytes are STREAMED
     into the entry — a source may contain single files far larger than
     RAM (model blobs), so reading one into memory is not an option. The
-    temp file replaces the cache atomically so a crashed build never
-    corrupts the cache; a failed build deletes its partial temp file.
+    temp file is published atomically (os.replace), so nothing ever
+    reads a partially written zip; a failed build deletes its partial
+    temp file (the tmp sweeps remove crash leftovers).
 
     A ``_HashingWriter`` (non-seekable) wraps the output stream, forcing
     zipfile's data-descriptor layout (flag 0x8): CRC and sizes are written
@@ -374,29 +305,27 @@ def _build_zip(
 def plan_archive_source(
     source: SourceDef,
     *,
-    staging_dir: Path,
+    work_dir: Path,
     written_manifest_sha: str | None = None,
     write_even_if_unchanged: bool = False,
 ) -> PlannedFile | None:
-    """Plan one archive source into a single staged zip file entry.
+    """Plan one archive source, building its zip fresh into work_dir.
 
     Hash-all semantics: every included file is read and hashed, so the
     manifest hash reflects true content. When the manifest hash matches
     ``written_manifest_sha`` (the archive already on tape) and the run
-    is incremental, the source is skipped entirely (returns None). On a
-    full run an unchanged archive is not rebuilt — the cached zip is
-    reused — but a PlannedFile is still returned so the data lands on
-    the new tape.
+    is incremental, the source is skipped entirely (returns None)
+    BEFORE any zip is built. On a full run an unchanged source is
+    always rebuilt: the new tape needs the data.
 
-    The built zip's SHA-256 is stored in the sidecar manifest alongside
-    the content manifest, eliminating a second full read of the zip on
-    every run. On cache hits the stored hash is reused directly; legacy
-    manifests (v0.11.2 and earlier) that lack ``zip_sha256`` trigger a
-    one-time backfill so subsequent runs also skip the read.
+    There is no persistent zip cache — the built zip is a per-run temp
+    file (``archive_<slug>.zip`` in work_dir) that the engine deletes
+    once the entry is written. On a cache hit nothing is kept between
+    runs; on a crash the leftover is removed by the tmp sweeps.
 
     Args:
         source: Archive source definition (archive=True).
-        staging_dir: Persistent cache directory for zips + manifests.
+        work_dir: Directory for the freshly built zip (``<data>/tmp``).
         written_manifest_sha: manifest_sha of the newest archive version
             already backed up (None = never backed up).
         write_even_if_unchanged: True for full runs — unchanged content
@@ -404,7 +333,7 @@ def plan_archive_source(
 
     Returns:
         PlannedFile with path = source root (the catalog/header path),
-        staging_path = cached zip, sha256 = zip hash, and kind
+        staging_path = the built zip, sha256 = zip hash, and kind
         "archive"; or None when the incremental run can skip the source
         or the source has no included files.
 
@@ -416,10 +345,12 @@ def plan_archive_source(
     if not root.is_dir():
         raise SnapshotError(f"Source directory does not exist: {root}")
 
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    # Deterministic per-source name: distinct slugs let concurrent
+    # planning build several sources at once without collisions, and a
+    # re-planned run overwrites its own leftover instead of accumulating.
     slug = _source_slug(str(root))
-    manifest_path = staging_dir / f"{slug}.manifest.json"
-    zip_path = staging_dir / f"{slug}.zip"
+    zip_path = work_dir / f"archive_{slug}.zip"
 
     entries = _walk_source(root, source)
     if not entries:
@@ -435,52 +366,25 @@ def plan_archive_source(
         logger.info("archive_unchanged_skipped", path=str(root))
         return None
 
-    reuse = False
-    zip_sha256: str | None = None
-    cached_manifest: ArchiveManifest | None = None
-    if manifest_path.exists() and zip_path.exists():
-        try:
-            cached_manifest = ArchiveManifest.from_bytes(manifest_path.read_bytes())
-            reuse = cached_manifest.manifest_sha == manifest_sha
-        except ArchiveError:
-            reuse = False
-    if reuse:
-        assert cached_manifest is not None  # set in try block when reuse=True
-        zip_size = zip_path.stat().st_size
-        if isinstance(cached_manifest.zip_sha256, str):
-            zip_sha256 = cached_manifest.zip_sha256
-        else:
-            # Legacy manifest — compute once and backfill.
-            zip_sha256 = sha256_of(zip_path)
-            new_manifest = ArchiveManifest(
-                cached_manifest.entries,
-                cached_manifest.manifest_sha,
-                zip_sha256,
-            ).serialize()
-            manifest_path.write_bytes(new_manifest)
-        logger.info("archive_cache_reused", path=str(root), size=zip_size)
-    else:
-        try:
-            zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
-        except OSError as exc:
-            # A file vanished after the walk hashed it, so the build's
-            # open() failed mid-stream. Re-walk (the skip guard drops the
-            # vanished file) and rebuild once so the manifest and the zip
-            # stay consistent; a second failure propagates and the engine
-            # applies continue_on_error.
-            logger.warning(
-                "archive_rebuild_after_vanish", path=str(root), error=repr(exc)
-            )
-            entries = _walk_source(root, source)
-            if not entries:
-                logger.warning("archive_source_empty", path=str(root))
-                return None
-            manifest_sha = manifest_digest(entries)
-            zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
-        manifest_path.write_bytes(
-            ArchiveManifest(entries, manifest_sha, zip_sha256).serialize()
+    try:
+        zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
+    except OSError as exc:
+        # A file vanished after the walk hashed it, so the build's
+        # open() failed mid-stream. Re-walk (the skip guard drops the
+        # vanished file) and rebuild once so the manifest and the zip
+        # stay consistent; a second failure propagates and the engine
+        # applies continue_on_error.
+        logger.warning(
+            "archive_rebuild_after_vanish", path=str(root), error=repr(exc)
         )
-        logger.info("archive_built", path=str(root), size=zip_size, files=len(entries))
+        entries = _walk_source(root, source)
+        if not entries:
+            logger.warning("archive_source_empty", path=str(root))
+            return None
+        manifest_sha = manifest_digest(entries)
+        zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
+
+    logger.info("archive_built", path=str(root), size=zip_size, files=len(entries))
 
     stat = zip_path.stat()
     return PlannedFile(

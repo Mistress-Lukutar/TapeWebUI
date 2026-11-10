@@ -40,6 +40,7 @@ from tapevaultui.services.catalog import CatalogRepository, sqlite_url_for_path
 from tapevaultui.services.drive_ops import DriveOpsState
 from tapevaultui.services.drive_service import DriveService
 from tapevaultui.services.event_bus import EventBus
+from tapevaultui.services.housekeeping import remove_staging_cache, sweep_tmp
 from tapevaultui.services.job_defs import JobDefStore
 from tapevaultui.services.job_runtime import JobRuntime
 from tapevaultui.services.restore_engine import RestoreEngine
@@ -101,6 +102,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     settings: Settings = app.state.settings
     settings.ensure_dirs()
+
+    # Leftover crash/cancel temp files and the removed persistent
+    # archive cache are pure garbage; reclaim them before anything runs.
+    sweep_tmp(settings.data_dir / "tmp")
+    remove_staging_cache(settings.data_dir / "staging")
 
     # Editable settings overrides (data/settings.json) applied before any
     # service is constructed, so transport/drive start with user values.
