@@ -117,7 +117,17 @@ def _iter_unignored(
     stack = [root]
     while stack:
         directory = stack.pop()
-        for entry in sorted(directory.iterdir()):
+        try:
+            children = sorted(directory.iterdir())
+        except OSError as exc:
+            # A directory deleted (or locked) while the walk was running:
+            # warn and continue - a live tree changes under a long walk,
+            # and one vanished scratch dir must not abort the source.
+            logger.warning(
+                "snapshot_dir_skipped", path=str(directory), error=repr(exc)
+            )
+            continue
+        for entry in children:
             if spec is not None:
                 relative = entry.relative_to(root).as_posix()
                 probe = f"{relative}/" if entry.is_dir() else relative

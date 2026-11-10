@@ -160,3 +160,24 @@ def test_snapshot_baseline_mtime_tolerance(tmp_path: Path) -> None:
     baseline = {str(root / "a.txt"): (stat.st_size, stat.st_mtime + 1.0)}
     plan = snapshot_sources([SourceDef(path=str(root))], baseline=baseline)
     assert plan == []
+
+
+def test_snapshot_skips_dir_vanished_mid_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (run 42): a directory deleted while the walk was
+    listing it is skipped with a warning, not a FileNotFoundError."""
+    root = tmp_path / "src"
+    (root / "gone").mkdir(parents=True)
+    (root / "gone" / "x.txt").write_bytes(b"X")
+    (root / "keep.txt").write_bytes(b"K")
+    real_iterdir = Path.iterdir
+
+    def vanishing_iterdir(self: Path):
+        if self.name == "gone":
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", vanishing_iterdir)
+    plan = snapshot_sources([SourceDef(path=str(root))])
+    assert [Path(f.path).name for f in plan] == ["keep.txt"]
