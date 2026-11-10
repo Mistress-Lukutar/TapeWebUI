@@ -26,6 +26,7 @@ from tapevaultui.services.job_defs import SourceDef
 from tapevaultui.services.snapshot import (
     READ_CHUNK,
     PlannedFile,
+    SnapshotError,
     _iter_unignored,
     _matches_any,
     sha256_of,
@@ -272,8 +273,18 @@ def _walk_source(root: Path, source: SourceDef) -> dict[str, tuple[int, float, s
         relative = file_path.relative_to(root).as_posix()
         if source.patterns and not _matches_any(relative, source.patterns):
             continue
-        stat = file_path.stat()
-        entries[relative] = (stat.st_size, stat.st_mtime, sha256_of(file_path))
+        try:
+            stat = file_path.stat()
+            file_hash = sha256_of(file_path)
+        except (OSError, SnapshotError) as exc:
+            # A file deleted (or locked) between listing and read — run 42
+            # lost the whole C:/_Source archive to this race. Warn with the
+            # path and skip; the next run's manifest picks the change up.
+            logger.warning(
+                "archive_file_skipped", path=str(file_path), error=repr(exc)
+            )
+            continue
+        entries[relative] = (stat.st_size, stat.st_mtime, file_hash)
     return entries
 
 
@@ -401,8 +412,6 @@ def plan_archive_source(
         SnapshotError: If the source root does not exist (the engine
             applies continue_on_error around this).
     """
-    from tapevaultui.services.snapshot import SnapshotError
-
     root = Path(source.path)
     if not root.is_dir():
         raise SnapshotError(f"Source directory does not exist: {root}")
@@ -451,7 +460,23 @@ def plan_archive_source(
             manifest_path.write_bytes(new_manifest)
         logger.info("archive_cache_reused", path=str(root), size=zip_size)
     else:
-        zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
+        try:
+            zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
+        except OSError as exc:
+            # A file vanished after the walk hashed it, so the build's
+            # open() failed mid-stream. Re-walk (the skip guard drops the
+            # vanished file) and rebuild once so the manifest and the zip
+            # stay consistent; a second failure propagates and the engine
+            # applies continue_on_error.
+            logger.warning(
+                "archive_rebuild_after_vanish", path=str(root), error=repr(exc)
+            )
+            entries = _walk_source(root, source)
+            if not entries:
+                logger.warning("archive_source_empty", path=str(root))
+                return None
+            manifest_sha = manifest_digest(entries)
+            zip_size, zip_sha256 = _build_zip(root, entries, zip_path)
         manifest_path.write_bytes(
             ArchiveManifest(entries, manifest_sha, zip_sha256).serialize()
         )

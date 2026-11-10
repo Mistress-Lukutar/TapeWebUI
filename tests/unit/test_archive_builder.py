@@ -545,3 +545,65 @@ def test_archive_manifest_zip_sha_roundtrip_and_legacy_parse() -> None:
     ).encode("utf-8")
     bad_parsed = ArchiveManifest.from_bytes(bad_bytes)
     assert bad_parsed.zip_sha256 is None
+
+
+def test_walk_skips_file_vanished_before_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (run 42): a file deleted between the walk listing and
+    its read is skipped with a warning instead of failing the source.
+    """
+    src = _make_tree(tmp_path)
+    victim = src / "a.txt"
+
+    def vanishing_sha256_of(path: Path) -> str:
+        if path == victim:
+            path.unlink()  # vanish after listing, before the read
+            raise FileNotFoundError(2, "No such file or directory")
+        return sha256_of(path)
+
+    monkeypatch.setattr(
+        "tapevaultui.services.archive_builder.sha256_of", vanishing_sha256_of
+    )
+    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+
+    assert entry is not None
+    assert entry.inner_count == 1  # a.txt skipped, nested/b.txt remains
+    with zipfile.ZipFile(entry.staging_path) as zf:
+        assert zf.namelist() == ["nested/b.txt"]
+
+
+def test_plan_rebuilds_after_file_vanishes_during_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file deleted after the walk (mid zip-stream) triggers exactly one
+    re-walk + rebuild so the sidecar manifest matches the written zip.
+    """
+    from tapevaultui.services.archive_builder import _build_zip
+
+    src = _make_tree(tmp_path)
+    victim = src / "nested" / "b.txt"
+    real_build = _build_zip
+    builds = {"count": 0}
+
+    def flaky_build(root: Path, entries, zip_path: Path) -> tuple[int, str]:
+        builds["count"] += 1
+        if builds["count"] == 1:
+            victim.unlink()  # vanish between walk and build open()
+            real_build(root, entries, zip_path)  # raises OSError midway
+        return real_build(root, entries, zip_path)
+
+    monkeypatch.setattr(
+        "tapevaultui.services.archive_builder._build_zip", flaky_build
+    )
+    entry = plan_archive_source(_source(tmp_path), staging_dir=tmp_path / "staging")
+
+    assert entry is not None
+    assert builds["count"] == 2  # one retry, not a loop
+    assert entry.inner_count == 1
+    with zipfile.ZipFile(entry.staging_path) as zf:
+        assert zf.namelist() == ["a.txt"]
+    manifest_files = list((tmp_path / "staging").glob("*.manifest.json"))
+    parsed = ArchiveManifest.from_bytes(manifest_files[0].read_bytes())
+    assert sorted(parsed.entries) == ["a.txt"]  # manifest matches the zip
+    assert not Path(entry.staging_path).with_suffix(".zip.tmp").exists()

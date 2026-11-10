@@ -473,12 +473,17 @@ class BackupEngine:
                     )
                 except Exception as exc:
                     if definition.options.continue_on_error:
-                        # repr, not str: message-less exceptions (MemoryError,
-                        # TimeoutError) would log an empty error field.
+                        # repr, not str, in ``error``: message-less exceptions
+                        # (MemoryError, TimeoutError) would log an empty field.
+                        # ``detail`` carries str(exc), whose OSError text
+                        # includes the filename that repr drops — which exact
+                        # file vanished is the first thing a failure triage
+                        # needs (run 42 had no way to tell).
                         logger.warning(
                             "archive_source_failed",
                             path=source.path,
                             error=repr(exc),
+                            detail=str(exc) or None,
                         )
                         return None
                     raise BackupEngineError(
