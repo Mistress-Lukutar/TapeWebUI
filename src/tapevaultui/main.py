@@ -12,6 +12,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -59,16 +60,67 @@ SSE_TOPICS: tuple[str, ...] = (
 )
 
 
-def configure_logging() -> None:
-    """Configure structlog with a console renderer."""
+def configure_logging(log_dir: Path) -> None:
+    """Configure logging: pretty console output plus a rotating JSON file.
+
+    structlog routes through stdlib logging so both sinks receive the
+    same events: the console keeps the dev renderer, ``tapewebui.log``
+    gets one JSON object per line for post-mortem searches. Re-running
+    (tests create several app instances) never stacks duplicate handlers.
+
+    Args:
+        log_dir: Directory holding the rotating ``tapewebui.log``.
+    """
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # pytest's capture handlers are StreamHandlers too — only add ours
+    # when no plain console handler exists yet.
+    if not any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in root.handlers
+    ):
+        console_formatter = structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared_processors,
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.dev.ConsoleRenderer(),
+            ],
+        )
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(console_formatter)
+        root.addHandler(console_handler)
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "tapewebui.log"
+    if not any(
+        isinstance(handler, RotatingFileHandler)
+        and handler.baseFilename == str(log_path)
+        for handler in root.handlers
+    ):
+        file_formatter = structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared_processors,
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.processors.JSONRenderer(),
+            ],
+        )
+        file_handler = RotatingFileHandler(
+            log_path, maxBytes=10 * 2**20, backupCount=5, encoding="utf-8"
+        )
+        file_handler.setFormatter(file_formatter)
+        root.addHandler(file_handler)
+
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        processors=shared_processors
+        + [structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
 
@@ -99,9 +151,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Yields:
         None once startup is complete.
     """
-    configure_logging()
     settings: Settings = app.state.settings
     settings.ensure_dirs()
+    configure_logging(settings.log_dir)
 
     # Leftover crash/cancel temp files and the removed persistent
     # archive cache are pure garbage; reclaim them before anything runs.
