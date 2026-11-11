@@ -623,6 +623,9 @@ class BackupEngine:
 
         for _offset, file in enumerate(files):
             if cancel_check and cancel_check():
+                self._catalog.set_session_end_position(
+                    session.id, session.file_base + physical_offset + 1
+                )
                 self._catalog.finish_session(session.id, status="failed")
                 raise JobCancelled(f"cancelled before {file.path}")
 
@@ -699,6 +702,11 @@ class BackupEngine:
                         inner_count=file.inner_count,
                         manifest_sha=file.manifest_sha,
                     )
+                    # The written prefix still occupies its positions;
+                    # record the next-free position before leaving.
+                    self._catalog.set_session_end_position(
+                        session.id, session.file_base + physical_offset + 1
+                    )
                     self._catalog.finish_session(session.id, status="partial")
                     if wait_for_media is None:
                         raise TapeFullError(f"Tape full: {stdout}")
@@ -747,6 +755,14 @@ class BackupEngine:
             stats.current_file_started = None
             bytes_written_in_pass += file.size
             await self.publish(stats)
+
+        # The pass is done (or stopped): record the true next-free tape
+        # position. Verify-damaged files were written and occupy their
+        # positions, so the next session's header must go one past every
+        # written file — not one past the ok-count.
+        self._catalog.set_session_end_position(
+            session.id, session.file_base + physical_offset + 1
+        )
 
         if hard_failure is not None:
             self._catalog.finish_session(session.id, status="failed")

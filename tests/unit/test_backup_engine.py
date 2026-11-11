@@ -206,6 +206,34 @@ async def test_verify_readback_updates_files(tmp_path: Path) -> None:
     assert "verification failed" in stats.error
 
 
+async def test_verify_damaged_files_keep_tape_positions(tmp_path: Path) -> None:
+    """Verify-damaged files occupy tape positions; the next session too.
+
+    A readback mismatch leaves the written file on the tape: the next
+    session's header must go one past every written file, not one past
+    the ok-count — the latter desynchronized every later session from
+    the physical layout after any mismatch.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"AAAA")
+    (src / "b.txt").write_bytes(b"BB")
+
+    fake = FakeItDtTransport()  # readback returns header text → mismatch
+    repo = _make_repo()
+    engine = BackupEngine(fake, repo, tmp_path / "work", EventBus())
+    await engine.execute(_definition(tmp_path), BackupStats("testjob"))
+
+    tape = repo.list_tapes()[0]
+    sessions = repo.list_sessions(tape.id)
+    files = repo.list_files(sessions[0].id)
+    damaged = [f for f in files if f.status == "damaged"]
+    assert len(damaged) == 2  # both written, both failed readback
+    assert sessions[0].end_position == 3  # header + 2 written files
+    second = repo.create_session(tape.id, job_name="next")
+    assert second.file_base == 3
+
+
 async def test_backup_adopts_pending_tape(tmp_path: Path) -> None:
     """A pending adoption reuses the old catalog record for a blank tape.
 

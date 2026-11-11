@@ -65,6 +65,11 @@ class BackupSession(Base):
     format_version: Mapped[int] = mapped_column(default=1)
     # Absolute tape position of this session's t0 header (fsf steps from BOP).
     file_base: Mapped[int] = mapped_column(default=0)
+    # Tape-absolute next-free position the engine recorded after this
+    # session's write pass. Verify-damaged files were written and occupy
+    # positions, so the next session's header goes here — not at an
+    # ok-only entry count. NULL for pre-0006 sessions.
+    end_position: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class FileEntry(Base):

@@ -414,6 +414,25 @@ class CatalogRepository:
             session.commit()
             return record
 
+    def set_session_end_position(self, session_id: int, end_position: int) -> None:
+        """Record the next free tape position after a session's write pass.
+
+        Called on every exit of the engine's write pass (done, cancel,
+        tape-full, hard failure) so the next session on the tape starts
+        at the physically true position even when files were damaged.
+
+        Args:
+            session_id: BackupSession primary key.
+            end_position: Tape-absolute position one past the last file
+                the pass wrote (the next session header's file_base).
+        """
+        with self._session_factory() as session:
+            record = session.get(BackupSession, session_id)
+            if record is None:
+                return
+            record.end_position = end_position
+            session.commit()
+
     def get_session(self, session_id: int) -> BackupSession | None:
         """Find a session by id.
 
@@ -1019,14 +1038,20 @@ def _next_tape_seq(session: Session, tape_id: int) -> int:
 def _next_tape_file_base(session: Session, tape_id: int) -> int:
     """Compute the absolute tape position for a new session's header.
 
-    The position is the sum of the physical footprints of the tape's
-    live (non-erased) sessions: one filemark-delimited position for each
-    t0 header plus one per ``ok`` source file. Only ``ok`` entries occupy
-    a tape position: damaged and EOM-skipped files never reached the
-    tape (a filemark-failure damaged file merges into its neighbour's
-    tape file), so counting them would offset every future session from
-    the physical layout. Erased sessions are skipped because an erase
-    wipes the whole tape, so the next session starts over at position 0.
+    The engine records ``end_position`` — the true next-free tape
+    position it observed after each session's write pass — and the
+    highest record on the tape is the new header's position. Recorded
+    positions are required because verify-damaged files were written
+    and read back, so they occupy tape positions an ok-only entry count
+    would silently drop, desynchronizing every later session from the
+    physical layout.
+
+    Sessions recorded before ``end_position`` existed carry NULL; when
+    no live session has a record, fall back to the legacy estimate: one
+    position per t0 header plus one per ``ok`` source file (write-failed
+    and EOM-skipped files never reached the tape in that accounting).
+    Erased sessions are skipped in both paths because an erase wipes the
+    whole cartridge, so the next session starts over at position 0.
 
     Args:
         session: Active SQLAlchemy session.
@@ -1035,6 +1060,14 @@ def _next_tape_file_base(session: Session, tape_id: int) -> int:
     Returns:
         Zero-based absolute tape file index for the new t0 header.
     """
+    recorded_end = session.scalar(
+        select(func.max(BackupSession.end_position)).where(
+            BackupSession.tape_id == tape_id,
+            BackupSession.status != "erased",
+        )
+    )
+    if recorded_end is not None:
+        return int(recorded_end)
     live_sessions = session.scalars(
         select(BackupSession.id).where(
             BackupSession.tape_id == tape_id,
