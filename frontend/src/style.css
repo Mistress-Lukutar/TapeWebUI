@@ -459,6 +459,25 @@ textarea {
   align-items: flex-end;
 }
 
+/* Local-time hint floats under the UTC time input without pushing the
+   row's fields out of alignment; the padding reserves room for it. */
+.schedule-row .form-field {
+  position: relative;
+}
+
+.schedule-time-hint {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.schedule-row.with-time-hint {
+  padding-bottom: 18px;
+}
+
 .day-pills {
   display: flex;
   flex-wrap: wrap;

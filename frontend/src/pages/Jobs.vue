@@ -5,6 +5,7 @@ import { apiGet, apiSend, formatBytes, formatIso } from '../api'
 import { useRuntimeStore } from '../composables/useRuntimeStore'
 import { useConfirm } from '../composables/useConfirm'
 import { formatDuration } from '../utils/duration'
+import { formatScheduleLocal } from '../utils/schedule'
 import JobEditor from '../components/JobEditor.vue'
 
 interface JobRow {
@@ -107,8 +108,8 @@ function parseJobInfo(yaml: string): JobInfo {
       : []
     let scheduleText = kind
     if (kind !== 'manual') {
-      const when = kind === 'weekly' && days.length ? `${days.join(', ')} ${time}` : time
-      scheduleText = `${kind} ${when}`.trim()
+      // YAML stores UTC; display the fire time converted to the local timezone.
+      scheduleText = formatScheduleLocal(kind, time, days)
     }
     return {
       sources: sources.map((source, idx) => ({

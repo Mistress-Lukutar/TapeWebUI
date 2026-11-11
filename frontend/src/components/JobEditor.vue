@@ -5,6 +5,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { dump as yamlDump, load as yamlLoad } from 'js-yaml'
 import { apiSend, formatBytes } from '../api'
+import { formatLocalTime } from '../utils/schedule'
 import AppModal from './AppModal.vue'
 import TagInput from './TagInput.vue'
 
@@ -347,6 +348,11 @@ const canSave = computed(() => !busy.value && !yamlError.value && !schemaError.v
 
 const title = computed(() => (props.job ? `Edit job: ${props.job.name}` : 'New job'))
 
+// Local-time equivalent of the UTC schedule input, shown as a hint.
+const scheduleTimeHint = computed(() =>
+  model.scheduleKind === 'manual' ? '' : formatLocalTime(model.scheduleTime),
+)
+
 async function save(): Promise<void> {
   saveError.value = ''
   busy.value = true
@@ -390,7 +396,7 @@ async function save(): Promise<void> {
 
         <div class="form-section">
           <h4>Schedule</h4>
-          <div class="form-grid schedule-row">
+          <div class="form-grid schedule-row" :class="{ 'with-time-hint': model.scheduleKind !== 'manual' }">
             <label class="form-field">
               <span>Run</span>
               <select v-model="model.scheduleKind">
@@ -402,6 +408,7 @@ async function save(): Promise<void> {
             <label v-if="model.scheduleKind !== 'manual'" class="form-field">
               <span>At time (UTC)</span>
               <input v-model="model.scheduleTime" type="time" />
+              <p v-if="scheduleTimeHint" class="dim schedule-time-hint">= {{ scheduleTimeHint }}</p>
             </label>
             <label v-if="model.scheduleKind !== 'manual'" class="form-field">
               <span>Catch-up on missed runs</span>
