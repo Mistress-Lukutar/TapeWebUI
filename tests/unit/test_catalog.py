@@ -182,6 +182,41 @@ def test_jobs_and_runs(repo: CatalogRepository) -> None:
     assert fetched.name == "photos"
 
 
+def test_fail_stale_runs(repo: CatalogRepository) -> None:
+    """Startup sweep fails non-terminal runs and leaves finished ones alone."""
+    job = repo.upsert_job("photos", sources_json={"path": "D:/Photos"})
+
+    queued = repo.create_job_run(job.id)
+    mid_flight = repo.create_job_run(job.id)
+    repo.update_job_run(mid_flight.id, status="writing")
+    waiting = repo.create_job_run(job.id)
+    repo.update_job_run(waiting.id, status="waiting_media")
+
+    done = repo.create_job_run(job.id)
+    repo.update_job_run(done.id, status="done", finished=True)
+    failed = repo.create_job_run(job.id)
+    repo.update_job_run(failed.id, status="failed", finished=True)
+    cancelled = repo.create_job_run(job.id)
+    repo.update_job_run(cancelled.id, status="cancelled", finished=True)
+
+    marked = repo.fail_stale_runs()
+    assert sorted(marked) == sorted([queued.id, mid_flight.id, waiting.id])
+    assert repo.fail_stale_runs() == []
+
+    for run_id in marked:
+        record = repo.get_job_run(run_id)
+        assert record is not None
+        assert record.status == "failed"
+        assert record.error
+        assert record.finished_at is not None
+
+    for run_id in (done.id, failed.id, cancelled.id):
+        record = repo.get_job_run(run_id)
+        assert record is not None
+        assert record.status in ("done", "failed", "cancelled")
+        assert record.error is None
+
+
 def test_delete_tape_cascades_erased_sessions(repo: CatalogRepository) -> None:
     """Deleting an erased tape removes its history and detaches runs."""
     tape = repo.register_tape("uuid-1", label="Old")

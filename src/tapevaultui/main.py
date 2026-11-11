@@ -134,6 +134,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     catalog = CatalogRepository(sqlite_url_for_path(settings.catalog_db_path))
     await asyncio.to_thread(_upgrade_catalog)
 
+    # Runs left queued/mid-flight by a previous crash or shutdown are
+    # orphaned: nothing owns them anymore, so mark them failed before
+    # the scheduler and runtime come up.
+    stale_ids = catalog.fail_stale_runs()
+    if stale_ids:
+        logger.warning("stale_runs_failed", run_ids=stale_ids)
+
     engine = BackupEngine(
         transport=transport,
         catalog=catalog,

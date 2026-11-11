@@ -919,6 +919,34 @@ class CatalogRepository:
             session.commit()
             return record
 
+    def fail_stale_runs(self) -> list[int]:
+        """Mark runs left non-terminal by a crash/shutdown as failed.
+
+        If the app exits while runs are queued or mid-flight, their rows
+        stay non-terminal forever because no process owns them anymore.
+        Called once at startup, before the scheduler and runtime start.
+
+        Returns:
+            Ids of the runs that were marked failed.
+        """
+        stale = (
+            "queued",
+            "preparing",
+            "writing",
+            "verifying",
+            "waiting_media",
+        )
+        with self._session_factory() as session:
+            runs = list(
+                session.scalars(select(JobRun).where(JobRun.status.in_(stale)))
+            )
+            for record in runs:
+                record.status = "failed"
+                record.error = "app restarted before the run finished"
+                record.finished_at = _now()
+            session.commit()
+            return [record.id for record in runs]
+
     # -- settings -----------------------------------------------------------
 
     def get_setting(self, key: str) -> dict[str, object] | None:
