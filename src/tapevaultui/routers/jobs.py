@@ -12,8 +12,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from tapevaultui.dependencies import JobDefStoreDep, JobRuntimeDep
-from tapevaultui.services.job_defs import JobDefinition, JobDefsError
+from tapevaultui.services.job_defs import JobDefinition, JobDefsError, SourceDef
 from tapevaultui.services.job_runtime import QueueEntry
+from tapevaultui.services.snapshot import SourcePreview, preview_source
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -200,6 +201,25 @@ async def cancel_job(runtime: JobRuntimeDep) -> dict[str, bool]:
         Whether anything was cancelled.
     """
     return {"cancelled": runtime.request_cancel()}
+
+
+class PreviewSourcesPayload(BaseModel):
+    """Request for per-source file-count previews (no hashing)."""
+
+    sources: list[SourceDef] = Field(description="Sources to preview")
+
+
+@router.post("/preview-sources")
+async def preview_sources(payload: PreviewSourcesPayload) -> list[SourcePreview]:
+    """Count files and bytes per source with pattern/exclude pruning.
+
+    Args:
+        payload: Source definitions from the editor form.
+
+    Returns:
+        One preview per source, in request order.
+    """
+    return [preview_source(source) for source in payload.sources]
 
 
 @router.get("/runtime/status")

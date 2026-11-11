@@ -122,3 +122,35 @@ def test_cancel_endpoint(client: TestClient) -> None:
     response = client.post("/api/jobs/cancel")
     assert response.status_code == 200
     assert response.json() == {"cancelled": False}
+
+
+def test_preview_sources_counts(client, tmp_path) -> None:
+    """Preview counts files/bytes per source with pattern pruning."""
+    source = tmp_path / "src_tree"
+    source.mkdir()
+    (source / "a.txt").write_text("hello")
+    (source / "b.log").write_text("x" * 10)
+    sub = source / "temp"
+    sub.mkdir()
+    (sub / "c.txt").write_text("ignored")
+
+    payload = {
+        "sources": [
+            {"path": str(source), "excludes": ["temp/", "*.log"]},
+            {"path": str(tmp_path / "missing")},
+        ]
+    }
+    response = client.post("/api/jobs/preview-sources", json=payload)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert len(result) == 2
+    first = result[0]
+    assert first["exists"] is True
+    assert first["files"] == 1
+    assert first["bytes"] == 5
+    assert result[1] == {
+        "path": str(tmp_path / "missing"),
+        "exists": False,
+        "files": 0,
+        "bytes": 0,
+    }

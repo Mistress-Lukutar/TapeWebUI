@@ -57,6 +57,57 @@ class SnapshotError(RuntimeError):
     """Raised when a source cannot be snapshotted."""
 
 
+class SourcePreview(BaseModel):
+    """Lightweight per-source file count (no hashing, UI preview only)."""
+
+    path: str
+    exists: bool
+    files: int = 0
+    bytes: int = 0
+
+
+def preview_source(source: SourceDef) -> SourcePreview:
+    """Count files and bytes a source would contribute, without hashing.
+
+    Applies the same include-pattern and gitignore pruning as
+    :func:`snapshot_sources`, so the numbers match what a run would pick
+    up (minus incremental baseline filtering, which is not known here).
+
+    Args:
+        source: Source definition to preview.
+
+    Returns:
+        The preview with exists/files/bytes; zeros when the root is
+        missing or unreadable.
+    """
+    root = Path(source.path)
+    if not root.is_dir():
+        return SourcePreview(path=source.path, exists=False)
+    spec = (
+        pathspec.GitIgnoreSpec.from_lines(source.excludes) if source.excludes else None
+    )
+    files = 0
+    total = 0
+    try:
+        for file_path in _iter_unignored(root, spec):
+            if not file_path.is_file():
+                continue
+            if source.patterns:
+                relative = file_path.relative_to(root).as_posix()
+                if not _matches_any(relative, source.patterns):
+                    continue
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            files += 1
+            total += stat.st_size
+    except OSError:
+        # The tree changed under the walk; the preview is best-effort.
+        logger.warning("preview_source_walk_failed", path=str(root))
+    return SourcePreview(path=source.path, exists=True, files=files, bytes=total)
+
+
 def sha256_of(path: Path) -> str:
     """Compute the sha256 hex digest of a file.
 

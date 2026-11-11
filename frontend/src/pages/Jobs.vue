@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { dump as yamlDump, load as yamlLoad } from 'js-yaml'
+import { load as yamlLoad } from 'js-yaml'
 import { apiGet, apiSend, formatBytes, formatIso } from '../api'
 import { useRuntimeStore } from '../composables/useRuntimeStore'
 import { useConfirm } from '../composables/useConfirm'
 import { formatDuration } from '../utils/duration'
-import AppModal from '../components/AppModal.vue'
+import JobEditor from '../components/JobEditor.vue'
 
 interface JobRow {
   name: string
@@ -37,18 +37,6 @@ interface JobEntry extends JobRow {
   info: JobInfo
 }
 
-const BLANK_YAML = `name: newjob
-sources:
-  - path: "D:/Data"
-    excludes: ["temp/", "*.tmp"]
-options:
-  mode: append
-  verify: readback
-  continue_on_error: true
-schedule:
-  kind: manual
-`
-
 const runtime = useRuntimeStore()
 const { confirm } = useConfirm()
 
@@ -61,15 +49,8 @@ const percent = computed(() => {
 const jobs = ref<JobRow[]>([])
 const selected = ref<JobRow | null>(null)
 const editorOpen = ref(false)
-const editorText = ref('')
 const error = ref('')
 const notice = ref('')
-const busy = ref(false)
-
-const ignoreSourceIdx = ref(0)
-const ignoreRules = ref<string[]>([])
-const newRule = ref('')
-const ignoreDirty = ref(false)
 
 const SOURCE_PREVIEW_LIMIT = 5
 const expandedSources = ref<Set<string>>(new Set())
@@ -90,30 +71,16 @@ function toggleSources(job: JobEntry) {
   expandedSources.value = next
 }
 
-const parsedSources = computed<YamlSource[]>(() => {
-  try {
-    const doc = yamlLoad(editorText.value)
-    if (doc && typeof doc === 'object' && Array.isArray((doc as { sources?: unknown }).sources)) {
-      return (doc as { sources: YamlSource[] }).sources
-    }
-  } catch {
-    // Unparseable YAML: the panel reports it below.
-  }
-  return []
-})
-
-const ignoreParseError = computed(() => {
-  try {
-    yamlLoad(editorText.value)
-    return ''
-  } catch (err) {
-    return `YAML parse error: ${err instanceof Error ? err.message : String(err)}`
-  }
-})
-
 const jobEntries = computed<JobEntry[]>(() =>
   jobs.value.map((job) => ({ ...job, info: parseJobInfo(job.yaml) })),
 )
+
+function onEditorSaved(name: string): void {
+  editorOpen.value = false
+  notice.value = selected.value ? `Saved ${selected.value.name}` : `Created ${name}`
+  load()
+  runtime.refreshSchedules()
+}
 
 function parseJobInfo(yaml: string): JobInfo {
   const fallback: JobInfo = {
@@ -159,88 +126,6 @@ function parseJobInfo(yaml: string): JobInfo {
   }
 }
 
-function pickIgnoreSource(): void {
-  const source = parsedSources.value[ignoreSourceIdx.value]
-  const excludes = source && Array.isArray(source.excludes) ? source.excludes : []
-  ignoreRules.value = excludes.filter((rule): rule is string => typeof rule === 'string')
-  ignoreDirty.value = false
-}
-
-function addRule(): void {
-  const rule = newRule.value.trim()
-  if (!rule || ignoreRules.value.includes(rule)) {
-    newRule.value = ''
-    return
-  }
-  ignoreRules.value.push(rule)
-  newRule.value = ''
-  ignoreDirty.value = true
-}
-
-function removeRule(idx: number): void {
-  ignoreRules.value.splice(idx, 1)
-  ignoreDirty.value = true
-}
-
-function applyIgnoreRules(): void {
-  error.value = ''
-  try {
-    const doc = yamlLoad(editorText.value) as { sources?: YamlSource[] } | null
-    if (!doc || !Array.isArray(doc.sources)) {
-      error.value = 'Job YAML has no sources to attach rules to'
-      return
-    }
-    const source = doc.sources[ignoreSourceIdx.value]
-    if (!source || typeof source !== 'object') {
-      error.value = 'Selected source no longer exists in the YAML'
-      return
-    }
-    if (ignoreRules.value.length) {
-      source.excludes = [...ignoreRules.value]
-    } else {
-      delete source.excludes
-    }
-    editorText.value = yamlDump(doc, { lineWidth: -1, noRefs: true })
-    ignoreDirty.value = false
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
-  }
-}
-
-function setSourceArchive(value: boolean): void {
-  error.value = ''
-  try {
-    const doc = yamlLoad(editorText.value) as { sources?: YamlSource[] } | null
-    if (!doc || !Array.isArray(doc.sources)) {
-      error.value = 'Job YAML has no sources to attach rules to'
-      return
-    }
-    const source = doc.sources[ignoreSourceIdx.value]
-    if (!source || typeof source !== 'object') {
-      error.value = 'Selected source no longer exists in the YAML'
-      return
-    }
-    if (value) {
-      source.archive = true
-    } else {
-      delete source.archive
-    }
-    editorText.value = yamlDump(doc, { lineWidth: -1, noRefs: true })
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
-  }
-}
-
-const archiveChecked = computed<boolean>({
-  get() {
-    const source = parsedSources.value[ignoreSourceIdx.value]
-    return Boolean(source && source.archive)
-  },
-  set(value: boolean) {
-    setSourceArchive(value)
-  },
-})
-
 async function load(): Promise<void> {
   try {
     jobs.value = await apiGet<JobRow[]>('/api/jobs')
@@ -251,34 +136,8 @@ async function load(): Promise<void> {
 
 function openEditor(job: JobRow | null): void {
   selected.value = job
-  editorText.value = job ? job.yaml : BLANK_YAML
   error.value = ''
-  ignoreSourceIdx.value = 0
-  pickIgnoreSource()
   editorOpen.value = true
-}
-
-async function save(): Promise<void> {
-  error.value = ''
-  busy.value = true
-  try {
-    if (selected.value) {
-      await apiSend(`/api/jobs/${selected.value.name}`, 'PUT', { content: editorText.value })
-      notice.value = `Saved ${selected.value.name}`
-    } else {
-      const created = await apiSend<{ name: string }>('/api/jobs', 'POST', {
-        content: editorText.value,
-      })
-      notice.value = `Created ${created.name}`
-    }
-    editorOpen.value = false
-    await load()
-    runtime.refreshSchedules()
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    busy.value = false
-  }
 }
 
 async function removeJob(name: string): Promise<void> {
@@ -393,70 +252,12 @@ onMounted(load)
     <p v-if="error" class="error-strip">{{ error }}</p>
   </div>
 
-  <AppModal
+  <JobEditor
     v-if="editorOpen"
-    :title="selected ? `Edit job: ${selected.name}` : 'New job'"
-    wide
+    :job="selected"
     @close="editorOpen = false"
-  >
-    <textarea v-model="editorText" class="yaml-editor" spellcheck="false"></textarea>
-    <div class="ignore-editor">
-      <h4>Ignore rules <span class="dim">(gitignore syntax, per source)</span></h4>
-      <p v-if="ignoreParseError" class="error-strip">{{ ignoreParseError }}</p>
-      <template v-else>
-        <div class="row-actions">
-          <select v-model.number="ignoreSourceIdx" @change="pickIgnoreSource()">
-            <option v-for="(source, idx) in parsedSources" :key="idx" :value="idx">
-              {{ typeof source.path === 'string' ? source.path : `source ${idx + 1}` }}{{ source.archive ? ' [zip]' : '' }}
-            </option>
-          </select>
-          <label class="archive-toggle" title="Back the whole source up as one zip tape file">
-            <input
-              type="checkbox"
-              :checked="archiveChecked"
-              :disabled="!parsedSources.length"
-              @change="archiveChecked = ($event.target as HTMLInputElement).checked"
-            />
-            archive → one zip tape file
-          </label>
-          <span v-if="!parsedSources.length" class="dim">No sources in YAML</span>
-        </div>
-        <div class="rule-tags">
-          <span v-for="(rule, idx) in ignoreRules" :key="rule + idx" class="rule-tag">
-            {{ rule }}
-            <button class="tag-remove" title="Remove rule" @click="removeRule(idx)">×</button>
-          </span>
-          <span v-if="!ignoreRules.length" class="dim">No ignore rules for this source.</span>
-        </div>
-        <div class="row-actions">
-          <input
-            v-model="newRule"
-            placeholder="temp/, *.tmp, cache/**, !keep.tmp"
-            @keyup.enter="addRule()"
-          />
-          <button :disabled="!newRule.trim() || !parsedSources.length" @click="addRule()">
-            Add
-          </button>
-          <button
-            class="primary"
-            :disabled="!ignoreDirty || !parsedSources.length"
-            @click="applyIgnoreRules()"
-          >
-            Apply to YAML
-          </button>
-        </div>
-        <p class="dim">
-          Directories match with a trailing slash (temp/), * matches within a
-          path segment, ** across segments, ! re-includes. Files under an
-          ignored directory cannot be re-included.
-        </p>
-      </template>
-    </div>
-    <template #footer>
-      <button @click="editorOpen = false">Cancel</button>
-      <button class="primary" :disabled="busy" @click="save()">Validate &amp; save</button>
-    </template>
-  </AppModal>
+    @saved="onEditorSaved"
+  />
 
   <div class="panel" v-if="runtime.state.job">
     <h3>Active job</h3>
